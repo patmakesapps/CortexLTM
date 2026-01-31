@@ -2,7 +2,6 @@
 .venv
 .venv_locked
 
-
 __pycache__/
 *.pyc
 .pytest_cache/
