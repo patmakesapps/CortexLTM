@@ -3,6 +3,8 @@ import json
 import math
 from typing import Any, Dict, List, Optional
 
+from .llm import summarize_update
+
 from .db import get_conn
 from .embeddings import embed_text
 
@@ -281,22 +283,23 @@ def _build_candidate_summary(
     prior_summary: Optional[str], turn_lines: List[str]
 ) -> str:
     """
-    v1: no LLM yet. We keep a rolling summary text that appends a compact update.
-    Later you’ll swap this function to call Groq/LLM.
+    v2: use Groq to keep the rolling summary concise.
     """
-    update_lines = []
-    for line in turn_lines:
-        s = str(line).strip().replace("\n", " ")
-        if len(s) > 260:
-            s = s[:260] + "…"
-        update_lines.append(f"- {s}")
+    try:
+        return summarize_update(prior_summary, turn_lines)
+    except Exception as e:
+        # fallback: keep old behavior if LLM is unavailable
+        update_lines = []
+        for line in turn_lines:
+            s = str(line).strip().replace("\n", " ")
+            if len(s) > 260:
+                s = s[:260] + "…"
+            update_lines.append(f"- {s}")
 
-    update_block = "New info:\n" + "\n".join(update_lines)
+        if not prior_summary:
+            return "Summary so far:\n" + "\n".join(update_lines)
 
-    if not prior_summary:
-        return "Summary so far:\n" + "\n".join(update_lines)
-
-    return prior_summary.rstrip() + "\n\n" + update_block
+        return prior_summary.rstrip() + "\n\nNew info:\n" + "\n".join(update_lines)
 
 
 def _archive_active_summary(thread_id: str) -> None:

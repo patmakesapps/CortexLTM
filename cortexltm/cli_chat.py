@@ -1,18 +1,55 @@
 from cortexltm.messages import create_thread, add_event
+from cortexltm.db import get_conn
+from cortexltm.llm import chat_reply
 
 MAX_USER_CHARS = 2000
 
 
-def assistant_stub(user_text: str) -> str:
-    t = user_text.strip()
-    if not t:
-        return "(stub) say something and I’ll log it."
-    low = t.lower()
-    if low in {"hi", "hello"}:
-        return "(stub) hey — logging this thread in CortexLTM."
-    if low.endswith("?"):
-        return "(stub) good question. (later an LLM will answer this)"
-    return f"(stub) got it: {t}"
+def _fetch_recent_context(thread_id: str, limit: int = 16):
+    """
+    Returns messages formatted for Groq:
+      [{"role":"user"|"assistant","content":"..."}]
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 40:
+        limit = 40
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select actor, content
+                from public.ltm_events
+                where thread_id = %s
+                order by created_at desc
+                limit %s;
+                """,
+                (thread_id, limit),
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    # rows are newest-first, reverse to chronological
+    rows.reverse()
+
+    out = []
+    for actor, content in rows:
+        role = "assistant" if actor == "assistant" else "user"
+        out.append({"role": role, "content": (content or "")})
+    return out
+
+
+def assistant_llm(thread_id: str, user_text: str) -> str:
+    context = _fetch_recent_context(thread_id, limit=16)
+    # context already includes the user's message because we log before calling this,
+    # so drop the last user message from context to avoid duplication.
+    if context and context[-1]["role"] == "user":
+        context = context[:-1]
+
+    return chat_reply(user_text=user_text, context_messages=context)
 
 
 def run_chat():
@@ -71,8 +108,8 @@ def run_chat():
             importance_score=0,
         )
 
-        # generate + write assistant stub event
-        reply = assistant_stub(user_text)
+        # generate + write assistant reply
+        reply = assistant_llm(thread_id, user_text)
         add_event(
             thread_id=thread_id,
             actor="assistant",
