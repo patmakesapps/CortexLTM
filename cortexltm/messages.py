@@ -4,6 +4,115 @@ from .embeddings import embed_text
 from .summaries import maybe_update_summary
 
 
+def _score_importance(actor: str, content: str) -> int:
+    """
+    v1 importance scoring for events.
+
+    Scale:
+      5 = identity/profile facts, explicit remember-intent
+      3 = plans/commitments/constraints
+      1 = mild preference/detail
+      0 = chatter
+
+    Only scores user events in v1.
+    """
+    if actor != "user":
+        return 0
+
+    t = (content or "").strip().lower()
+    if not t:
+        return 0
+
+    # trivial chatter => 0
+    trivial = {
+        "ok",
+        "okay",
+        "k",
+        "kk",
+        "lol",
+        "lmao",
+        "bet",
+        "nice",
+        "cool",
+        "word",
+        "yup",
+        "yeah",
+        "nah",
+        "thanks",
+        "thx",
+        "ty",
+        "cya",
+        "bye",
+        "goodbye",
+        "hi",
+        "hello",
+        "hey",
+        "yo",
+        "sup",
+        "what's up",
+        "whats up",
+    }
+    if t in trivial:
+        return 0
+
+    # 5 = identity/profile + explicit memory intent
+    high = [
+        "my name is",
+        "call me ",
+        "i am ",
+        "i'm ",
+        "my email",
+        "my phone",
+        "my address",
+        "my birthday",
+        "remember that",
+        "remember this",
+    ]
+    if any(p in t for p in high):
+        return 5
+
+    # 3 = plans/constraints/commitments
+    medium = [
+        "i need to",
+        "i want to",
+        "we need to",
+        "we should",
+        "let's",
+        "deadline",
+        "plan",
+        "goal is",
+        "do not",
+        "don't",
+        "never ",
+        "avoid ",
+        "only ",
+        "must ",
+        "cannot ",
+        "can't ",
+    ]
+    if any(p in t for p in medium):
+        return 3
+
+    # 1 = preferences / mild durable details
+    low = [
+        "i like",
+        "i love",
+        "i hate",
+        "i prefer",
+        "my favorite",
+        "i don't like",
+        "i dislike",
+    ]
+    if any(p in t for p in low):
+        return 1
+
+    # heuristic: longer user messages tend to contain signal
+    if len(t) >= 120:
+        return 1
+
+    return 0
+
+
 def create_thread(title=None):
     """
     Creates a new thread in ltm_threads
@@ -58,7 +167,24 @@ def add_event(
     if meta is None:
         meta = {}
 
-    emb = embed_text(content) if embed else None
+    # v1 auto-rating + auto-embed:
+    # - If caller leaves importance_score at 0, we score it.
+    # - If importance_score >= 3, we force embed=True (early-memory buffer).
+    if importance_score == 0:
+        importance_score = _score_importance(actor, content)
+
+    if importance_score >= 3:
+        embed = True
+
+    emb = None
+    if embed:
+        try:
+            emb = embed_text(content)
+        except Exception as e:
+            print(
+                f"(warn) embedding failed; storing without embedding: {type(e).__name__}: {e}"
+            )
+            emb = None
     emb_literal = _vector_literal(emb)
 
     conn = get_conn()

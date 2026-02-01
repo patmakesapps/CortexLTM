@@ -1,0 +1,5 @@
+# activate the .venv
+.\.venv\Scripts\Activate.ps1
+
+# run cli chat for testing
+ - python -m cortexltm.cli_chat
