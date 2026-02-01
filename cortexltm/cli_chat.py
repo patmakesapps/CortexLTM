@@ -1,5 +1,7 @@
 from cortexltm.messages import create_thread, add_event
 
+MAX_USER_CHARS = 2000
+
 
 def assistant_stub(user_text: str) -> str:
     t = user_text.strip()
@@ -21,15 +23,32 @@ def run_chat():
     print("Type messages and press Enter.")
     print("Commands: /new (new thread), /thread (show id), /exit\n")
 
+    over_limit = False
+
     while True:
         try:
-            user_text = input("you> ").strip()
+            user_text = input("you> ")
         except (EOFError, KeyboardInterrupt):
             print("\n/exiting")
             break
 
+        user_text = user_text.strip()
+
         if not user_text:
             continue
+
+        # show the warning until they fix the input length
+        if len(user_text) > MAX_USER_CHARS:
+            over_limit = True
+            print(
+                f"(error) Character limit exceeded ({len(user_text)}/{MAX_USER_CHARS}). "
+                f"Please shorten your message."
+            )
+            continue
+
+        # once they're back under limit, clear the warning state
+        if over_limit:
+            over_limit = False
 
         if user_text in {"/exit", "/quit"}:
             break
