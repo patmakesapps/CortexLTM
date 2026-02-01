@@ -35,7 +35,10 @@ Pick: C:\myproject\.venv\Scripts\python.exe (or whatever your project path is).
 
 pip install psycopg-binary
 
-8) 
+## Run Scripts in sql folder
+Scripts are numbered in the order they were ran. It is highly recommended to run them in the exact order as they are listed.
+
+
 
 
 
