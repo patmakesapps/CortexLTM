@@ -19,7 +19,7 @@ This repo currently includes a working v1 of that pipeline using:
 
 ## What works right now (v1)
 
-### ✅ Database schema (SQL migrations)
+### Database schema (SQL migrations)
 The schema is implemented as ordered SQL scripts:
 
 - `sql/00_extensions.sql`
@@ -38,7 +38,7 @@ The schema is implemented as ordered SQL scripts:
   - Enforces **exactly one active** summary per thread via partial unique index
   - Optional summary embeddings for semantic retrieval
 
-### ✅ Thread creation + event logging (Python)
+### Thread creation + event logging (Python)
 Core functions:
 - `create_thread(title=None)` inserts into `ltm_threads`
 - `add_event(thread_id, actor, content, meta, importance_score=0, embed=False)`
@@ -47,7 +47,7 @@ Core functions:
   - Auto-embeds events when importance is high (>=3)
   - After an **assistant** event is written, it triggers `maybe_update_summary()`
 
-### ✅ Importance scoring (v1 heuristic)
+### Importance scoring (v1 heuristic)
 A lightweight scoring function `_score_importance()` categorizes user messages:
 - `5` = identity/profile facts OR explicit “remember this”
 - `3` = plans/commitments/constraints (“I need to…”, “we should…”, “must…”, etc.)
@@ -56,7 +56,7 @@ A lightweight scoring function `_score_importance()` categorizes user messages:
 
 If score >= 3, the event is force-embedded as an “early memory buffer”.
 
-### ✅ Embeddings provider (OpenAI, swappable later)
+### Embeddings provider (OpenAI, swappable later)
 `cortexltm/embeddings.py` provides one function:
 - `embed_text(text) -> list[float]`
 
@@ -66,7 +66,7 @@ Behavior:
 - Hard asserts **1536** dimensions to match DB `vector(1536)`
 - Basic safety clamp by **characters** (no token dependency)
 
-### ✅ Semantic search over events (pgvector)
+### Semantic search over events (pgvector)
 `search_events_semantic(query, k=5, thread_id=None)`:
 - embeds the query
 - runs pgvector distance search:
@@ -77,7 +77,7 @@ Notes:
 - Only searches events where `embedding IS NOT NULL`
 - Optional `thread_id` filter
 
-### ✅ Rolling summaries + episodic memory (meaningful-turn based)
+### Rolling summaries + episodic memory (meaningful-turn based)
 `cortexltm/summaries.py` implements automatic summary updates:
 
 **Definitions**
@@ -110,7 +110,7 @@ Each summary row stores:
 - `meta` (why/when it updated)
 - optional `embedding`
 
-### ✅ LLM harness (Groq) for summaries + dev chat
+### LLM harness (Groq) for summaries + dev chat
 `cortexltm/llm.py` is currently used for:
 - `summarize_update(prior_summary, turn_lines)` — generates concise bullet summary
 - `chat_reply(user_text, context_messages)` — dev-friendly chat response
@@ -119,7 +119,7 @@ This is a **harness** for development. Production apps will typically:
 - Use their own LLM runtime
 - Call CortexLTM for memory writes + retrieval + summarization policies
 
-### ✅ CLI dev harness
+### CLI dev harness
 A simple CLI loop exists to test end-to-end behavior:
 - Creates a thread
 - Logs user events
