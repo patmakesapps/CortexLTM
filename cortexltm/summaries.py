@@ -9,7 +9,7 @@ from .db import get_conn
 from .embeddings import embed_text
 
 # --- v1 knobs (keep simple) ---
-MEANINGFUL_TARGET = 10  # every 10 meaningful TURNS (user + next assistant)
+MEANINGFUL_TARGET = 30  # every 30 meaningful TURNS (user + next assistant)
 FETCH_LOOKBACK = 120  # pull up to N events since last summary end
 TOPIC_SHIFT_COSINE_MIN = 0.75  # lower => more likely new topic
 

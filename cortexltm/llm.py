@@ -54,8 +54,10 @@ def chat_reply(
         {
             "role": "system",
             "content": (
-                "You are a helpful assistant. Be concise, accurate, and direct."
-                "Be engaging and confident but not annoying. Offer a solution or propose a next step if applicable."
+                "You are an intelligent AI companion. Be concise, accurate, and direct."
+                "Be engaging, respond with confidence, but not annoying."
+                "Avoid asking qustions when possible. Instead offer a solution or propose next steps when applicable."
+                "Avoid using the users name in conversation unless it feels natural."
             ),
         }
     ]
@@ -108,14 +110,18 @@ def summarize_update(
     prior = (prior_summary or "").strip()
 
     prompt = (
-        "Update the conversation memory summary.\n"
-        "Rules:\n"
-        "- Output ONLY the updated summary.\n"
+        "You are maintaining a long-term memory summary for an assistant.\n"
+        "Update the summary using ONLY the new turns.\n\n"
+        "Hard rules:\n"
+        "- Output ONLY the updated summary (no preface, no title).\n"
         "- Use 3–7 short bullet points.\n"
-        "- Capture durable facts, decisions, constraints, goals, next steps.\n"
-        "- Do NOT include chit-chat, greetings, filler.\n"
-        "- Do NOT invent details.\n"
-        "- Prefer concrete names, numbers, and tasks.\n"
+        "- Include ONLY: durable user facts, explicit decisions, stated constraints, concrete plans/commitments, and key open questions.\n"
+        "- Treat assistant messages as NOT durable unless they record a decision made by the user.\n"
+        "- Do NOT include generic conversational goals (e.g., 'help with coding', 'discuss travel') unless the user explicitly stated it as an ongoing plan.\n"
+        "- Do NOT infer future intentions, next steps, or goals unless the user explicitly committed to them.\n"
+        "- Do NOT restate examples, filler, greetings, or meta commentary.\n"
+        "- Do NOT invent details. If location/weather is unknown, record it as unknown only if it matters.\n"
+        "- Prefer concrete nouns + actions (names, places, tasks, deadlines) over vague summaries.\n"
     )
 
     user_payload = "NEW TURNS:\n" + "\n".join(f"- {x}" for x in cleaned_lines)
