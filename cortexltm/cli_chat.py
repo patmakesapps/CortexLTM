@@ -1,6 +1,12 @@
+import os
+from dotenv import load_dotenv
+
 from cortexltm.messages import create_thread, add_event
 from cortexltm.db import get_conn
 from cortexltm.llm import chat_reply
+
+load_dotenv(override=True)
+
 
 MAX_USER_CHARS = 2000
 
@@ -53,7 +59,14 @@ def assistant_llm(thread_id: str, user_text: str) -> str:
 
 
 def run_chat():
-    thread_id = create_thread(title="CLI Chat Thread")
+    user_id = (os.getenv("CORTEXLTM_USER_ID") or "").strip()
+    if not user_id:
+        raise RuntimeError(
+            "Missing CORTEXLTM_USER_ID in .env (must be a uuid). "
+            "Example: CORTEXLTM_USER_ID=00000000-0000-0000-0000-000000000000"
+        )
+
+    thread_id = create_thread(user_id=user_id, title="CLI Chat Thread")
 
     print("\n=== CortexLTM CLI Chat (STUB) ===")
     print(f"Thread ID: {thread_id}")
@@ -95,7 +108,7 @@ def run_chat():
             continue
 
         if user_text == "/new":
-            thread_id = create_thread(title="CLI Chat Thread")
+            thread_id = create_thread(user_id=user_id, title="CLI Chat Thread")
             print(f"(info) new thread_id = {thread_id}")
             continue
 

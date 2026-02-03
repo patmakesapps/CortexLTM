@@ -113,22 +113,26 @@ def _score_importance(actor: str, content: str) -> int:
     return 0
 
 
-def create_thread(title=None):
+def create_thread(user_id: str, title=None):
     """
-    Creates a new thread in ltm_threads
-    and returns the thread_id as a string.
+    Creates a new thread in ltm_threads and returns the thread_id as a string.
+
+    user_id: REQUIRED (uuid string) - identity key for cross-chat master memory
     """
+
+    if not user_id or not str(user_id).strip():
+        raise ValueError("create_thread: user_id is required")
 
     conn = get_conn()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                insert into public.ltm_threads (title)
-                values (%s)
+                insert into public.ltm_threads (user_id, title)
+                values (%s, %s)
                 returning id;
                 """,
-                (title,),
+                (str(user_id), title),
             )
             thread_id = cur.fetchone()[0]
 
