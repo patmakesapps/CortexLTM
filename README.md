@@ -27,6 +27,7 @@ The schema is implemented as ordered SQL scripts:
 
 - `sql/01_threads.sql`
   - `ltm_threads`: conversation container
+  - Includes `user_id uuid not null` for cross-chat identity
 
 - `sql/02_events.sql`
   - `ltm_events`: append-only message log per thread
@@ -38,9 +39,17 @@ The schema is implemented as ordered SQL scripts:
   - Enforces **exactly one active** summary per thread via partial unique index
   - Optional summary embeddings for semantic retrieval
 
-### Thread creation + event logging (Python)
+- `sql/04_master_memory.sql`
+  - `ltm_master_items`: user-level memory store (cross-chat)
+  - `ltm_master_evidence`: audit trail linking items to threads/events/summaries
+  - `set_updated_at()` trigger helper for `updated_at`
+
+---
+
+## Thread creation + event logging (Python)
 Core functions:
-- `create_thread(title=None)` inserts into `ltm_threads`
+- `create_thread(user_id, title=None)` inserts into `ltm_threads`
+  - `user_id` is required because `ltm_threads.user_id` is `NOT NULL`
 - `add_event(thread_id, actor, content, meta, importance_score=0, embed=False)`
   - Writes into `ltm_events`
   - Auto-scores **user** messages if caller leaves `importance_score=0`
@@ -121,7 +130,7 @@ This is a **harness** for development. Production apps will typically:
 
 ### CLI dev harness
 A simple CLI loop exists to test end-to-end behavior:
-- Creates a thread
+- Creates a thread (requires a user id)
 - Logs user events
 - Generates assistant replies (Groq)
 - Logs assistant events
@@ -137,13 +146,15 @@ This is intentionally a test harness — the “real product” is the memory la
   - `embeddings.py` — OpenAI embedding wrapper
   - `llm.py` — Groq wrapper for chat + summarization
   - `summaries.py` — rolling summary + topic shift logic
-  - `messages.py` — thread/event helpers + CLI harness wiring
+  - `messages.py` — thread/event helpers + semantic search
+  - `cli_chat.py` — CLI harness
   - `__init__.py` — version metadata
 - `sql/`
   - `00_extensions.sql`
   - `01_threads.sql`
   - `02_events.sql`
   - `03_summaries.sql`
+  - `04_master_memory.sql`
 - `.env.example` — env template
 - `README.md` — setup instructions (actively evolving)
 
@@ -154,6 +165,7 @@ Required:
 - `SUPABASE_DB_URL` — Postgres connection string
 - `OPENAI_API_KEY` — embeddings
 - `GROQ_API_KEY` — summary LLM (and optional chat harness)
+- `CORTEXLTM_USER_ID` — uuid used by the CLI harness (dev identity)
 
 Optional:
 - `OPENAI_EMBED_MODEL` (default `text-embedding-3-small`)
@@ -176,6 +188,7 @@ These are deliberate tradeoffs to keep CortexLTM small and shippable early:
 - **No formal retrieval composer yet**:
   - event semantic search exists
   - summary search can be added next (same pattern)
+  - master memory write policy is next
 - **No tests yet**:
   - next step is a minimal test suite for DB + summarization boundaries
 - **No packaging polish yet**:
@@ -190,23 +203,31 @@ These are deliberate tradeoffs to keep CortexLTM small and shippable early:
    - same pgvector pattern as events
 
 2) **Unified retrieval function**
-   - a simple `retrieve_memory(thread_id, query)` returning:
+   - a simple `retrieve_memory(user_id, thread_id, query)` returning:
      - active summary
      - top-K similar summaries (optional)
      - top-K similar events (optional)
+     - top-K relevant master memory items (cross-chat)
      - most recent N raw events (context)
 
-3) **Provider abstraction**
+3) **Master memory writer policy**
+   - controlled v1 extractor that proposes:
+     - new master items
+     - reinforcement of existing items
+     - conflict/deprecate actions
+   - writes evidence links into `ltm_master_evidence`
+
+4) **Provider abstraction**
    - Embeddings: OpenAI now, but support local later (e.g., sentence-transformers)
    - Summaries: Groq now, but support OpenAI / local later
 
-4) **Batch + retry strategy**
+5) **Batch + retry strategy**
    - better handling for rate limits / transient failures
    - optional queue-based embedding
 
-5) **Packaging + docs**
+6) **Packaging + docs**
    - clean public API surface:
-     - `create_thread()`
+     - `create_thread(user_id)`
      - `add_event()`
      - `retrieve_memory()`
      - `search_events_semantic()`
