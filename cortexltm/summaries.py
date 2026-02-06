@@ -14,6 +14,72 @@ FETCH_LOOKBACK = 120  # pull up to N events since last summary end
 TOPIC_SHIFT_COSINE_MIN = 0.75  # lower => more likely new topic
 
 
+def _sync_master_from_active_summary(thread_id: str) -> None:
+    """
+    v1 wiring: when a thread summary is updated, write ONE master-memory item
+    + evidence pointing at the summary_id.
+
+    Keep it intentionally dumb for now (no extraction):
+      - bucket: PROJECTS
+      - text: compact slice of the active summary
+    """
+    try:
+        from .master_memory import upsert_master_item, add_master_evidence
+
+        active = _get_active_summary(thread_id)
+        if not active:
+            return
+
+        summary_id = active.get("id")
+        summary_text = (active.get("summary") or "").strip()
+        if not summary_id or not summary_text:
+            return
+
+        # Get user_id for this thread (needed for master items)
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select user_id from public.ltm_threads where id = %s limit 1;",
+                    (thread_id,),
+                )
+                row = cur.fetchone()
+            user_id = str(row[0]) if row and row[0] else None
+        finally:
+            conn.close()
+
+        if not user_id:
+            return
+
+        # Very small, stable master item (avoid dumping huge text)
+        compact = summary_text.replace("\n", " ").strip()
+        if len(compact) > 220:
+            compact = compact[:220] + "…"
+
+        master_text = f"CortexLTM thread summary: {compact}"
+
+        master_id = upsert_master_item(
+            user_id=user_id,
+            bucket="PROJECTS",
+            text=master_text,
+            confidence=0.55,
+            stability="med",
+            embed=True,
+            meta={"source": "auto_summary_wire"},
+        )
+
+        add_master_evidence(
+            master_item_id=master_id,
+            thread_id=thread_id,
+            summary_id=summary_id,
+            weight=1.0,
+            meta={"source": "auto_summary_wire"},
+        )
+    except Exception:
+        # Never let master-memory wiring break the chat loop
+        return
+
+
 # -----------------------------
 # helpers
 # -----------------------------
@@ -338,7 +404,9 @@ def _insert_active_summary(
                 insert into public.ltm_thread_summaries
                   (thread_id, range_start_event_id, range_end_event_id, summary, meta, embedding, is_active)
                 values
-                  (%s, %s, %s, %s, %s::jsonb, (%s)::vector, true)
+                  (%s, %s, %s, %s, %s::jsonb,
+                   case when %s is null then null else (%s)::vector end,
+                   true)
                 returning id;
                 """,
                 (
@@ -347,6 +415,7 @@ def _insert_active_summary(
                     end_event_id,
                     summary_text,
                     json.dumps(meta),
+                    emb_literal,
                     emb_literal,
                 ),
             )
@@ -401,7 +470,7 @@ def maybe_update_summary(thread_id: str) -> bool:
     v1 behavior:
     - Count meaningful TURNS since last summary end.
       TURN = user event + next assistant event (if present).
-    - When we have 10 meaningful turns:
+    - When we have 30 meaningful turns:
         - Build candidate summary text (simple heuristic)
         - Topic-shift check using cosine similarity of summary embeddings
         - If shift: archive old active + insert new active
@@ -496,6 +565,10 @@ def maybe_update_summary(thread_id: str) -> bool:
             meta={"reason": "init", "meaningful_turns": MEANINGFUL_TARGET},
             embed=True,
         )
+
+        # v1 wiring: write one master item from the active summary
+        _sync_master_from_active_summary(thread_id)
+
         return True
 
     if topic_shift:
@@ -512,6 +585,9 @@ def maybe_update_summary(thread_id: str) -> bool:
             meta={"reason": "topic_shift", "meaningful_turns": MEANINGFUL_TARGET},
             embed=True,
         )
+
+        _sync_master_from_active_summary(thread_id)
+
         return True
 
     _update_active_summary(
@@ -521,4 +597,7 @@ def maybe_update_summary(thread_id: str) -> bool:
         meta_patch={"reason": "rolling_update", "meaningful_turns": MEANINGFUL_TARGET},
         embed=True,
     )
+
+    _sync_master_from_active_summary(thread_id)
+
     return True

@@ -213,6 +213,61 @@ def add_event(
 
         conn.commit()
 
+        # ---- v1.1: immediate master-memory capture for high-signal USER facts ----
+        if actor == "user" and importance_score >= 5:
+            try:
+                from .master_memory import upsert_master_item, add_master_evidence
+
+                # fetch user_id for this thread
+                conn2 = get_conn()
+                try:
+                    with conn2.cursor() as cur2:
+                        cur2.execute(
+                            "select user_id from public.ltm_threads where id = %s limit 1;",
+                            (str(thread_id),),
+                        )
+                        row = cur2.fetchone()
+                    user_id = str(row[0]) if row and row[0] else None
+                finally:
+                    conn2.close()
+
+                if user_id:
+                    # very lean v1 mapping: treat identity phrases as PROFILE
+                    # later you can replace with an LLM extractor  bucketed claims
+                    t = (content or "").strip()
+                    bucket = (
+                        "PROFILE"
+                        if any(
+                            p in t.lower()
+                            for p in ["my name is", "call me ", "i am ", "i'm "]
+                        )
+                        else "LONG_RUNNING_CONTEXT"
+                    )
+
+                    master_id = upsert_master_item(
+                        user_id=user_id,
+                        bucket=bucket,
+                        text=t,
+                        confidence=0.70,
+                        stability="med",
+                        embed=True,
+                        meta={
+                            "source": "auto_event_capture",
+                            "importance_score": importance_score,
+                        },
+                    )
+
+                    add_master_evidence(
+                        master_item_id=master_id,
+                        thread_id=str(thread_id),
+                        event_id=str(event_id),
+                        weight=1.0,
+                        meta={"source": "auto_event_capture"},
+                    )
+            except Exception:
+                # Never let memory capture break chat loop
+                pass
+
         # v1: update summaries after a full turn completes (assistant written)
         if actor == "assistant":
             try:
