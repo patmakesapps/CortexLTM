@@ -113,6 +113,27 @@ def _score_importance(actor: str, content: str) -> int:
     return 0
 
 
+PROJECT_MEMORY_CUES = [
+    ("project", "PROJECTS"),
+    ("learning", "PROJECTS"),
+    ("lesson", "PROJECTS"),
+    ("plan", "PROJECTS"),
+    ("vacation", "PROJECTS"),
+    ("working on", "PROJECTS"),
+    ("projects", "PROJECTS"),
+    ("memory layer", "LONG_RUNNING_CONTEXT"),
+    ("memory specific", "LONG_RUNNING_CONTEXT"),
+]
+
+
+def _project_memory_bucket(content: str) -> str | None:
+    t = (content or "").lower()
+    for phrase, bucket in PROJECT_MEMORY_CUES:
+        if phrase in t:
+            return bucket
+    return None
+
+
 def create_thread(user_id: str, title=None):
     """
     Creates a new thread in ltm_threads and returns the thread_id as a string.
@@ -213,8 +234,11 @@ def add_event(
 
         conn.commit()
 
-        # ---- v1.1: immediate master-memory capture for high-signal USER facts ----
-        if actor == "user" and importance_score >= 5:
+        project_bucket = _project_memory_bucket(content)
+        capture_forced = actor == "user" and (
+            importance_score >= 5 or project_bucket is not None
+        )
+        if capture_forced:
             try:
                 from .master_memory import upsert_master_item, add_master_evidence
 
@@ -232,18 +256,19 @@ def add_event(
                     conn2.close()
 
                 if user_id:
-                    # very lean v1 mapping: treat identity phrases as PROFILE
-                    # later you can replace with an LLM extractor  bucketed claims
                     t = (content or "").strip()
-                    bucket = (
-                        "PROFILE"
-                        if any(
-                            p in t.lower()
-                            for p in ["my name is", "call me ", "i am ", "i'm "]
+                    bucket = project_bucket
+                    if not bucket:
+                        bucket = (
+                            "PROFILE"
+                            if any(
+                                p in t.lower()
+                                for p in ["my name is", "call me ", "i am ", "i'm "]
+                            )
+                            else "LONG_RUNNING_CONTEXT"
                         )
-                        else "LONG_RUNNING_CONTEXT"
-                    )
 
+                    stored_importance = max(importance_score, 5)
                     master_id = upsert_master_item(
                         user_id=user_id,
                         bucket=bucket,
@@ -253,7 +278,12 @@ def add_event(
                         embed=True,
                         meta={
                             "source": "auto_event_capture",
-                            "importance_score": importance_score,
+                            "importance_score": stored_importance,
+                            "capture_reason": (
+                                "project_phrase"
+                                if project_bucket
+                                else "importance_high"
+                            ),
                         },
                     )
 

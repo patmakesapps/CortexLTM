@@ -65,6 +65,9 @@ A lightweight scoring function `_score_importance()` categorizes user messages:
 
 If score >= 3, the event is force-embedded as an “early memory buffer”.
 
+### Master-memory capture heuristics
+The auto master-memory hook now listens for general cues about ongoing work so we do not have to wait for a full rolling summary. Phrases like “project”, “learning”, “lesson”, “plan”, “vacation”, “working on”, “projects”, “memory layer”, or “memory specific” are mapped into `PROJECTS` or `LONG_RUNNING_CONTEXT` buckets and upserted immediately with metadata. That keeps facts such as your HTML project, lesson plan, or memory-layer experiment available for cross-thread semantic searches before 12 meaningful turns finish.
+
 ### Embeddings provider (OpenAI, swappable later)
 `cortexltm/embeddings.py` provides one function:
 - `embed_text(text) -> list[float]`
@@ -92,10 +95,10 @@ Notes:
 **Definitions**
 - A **TURN** = user event + the next assistant event (if present)
 - A turn is “meaningful” via `is_meaningful_turn(user_text, assistant_text)`
-- When enough meaningful turns accumulate, we update/insert a summary row.
+- When enough meaningful turns accumulate (currently **12**), we update/insert a summary row.
 
 **Current knobs (v1)**
-- `MEANINGFUL_TARGET = 30` meaningful turns required to summarize
+- `MEANINGFUL_TARGET = 12` meaningful turns required to summarize
 - `FETCH_LOOKBACK = 120` max events pulled since last summary end
 - `TOPIC_SHIFT_COSINE_MIN = 0.75` threshold to split into a new episode
 
@@ -135,6 +138,8 @@ A simple CLI loop exists to test end-to-end behavior:
 - Generates assistant replies (Groq)
 - Logs assistant events
 - Automatically triggers summary updates when assistant messages are written
+
+The CLI now only prepends semantic retrieval hits when `_needs_semantic_memory()` sees cues such as “recap,” “what was the plan,” or “remember,” and each retrieved block is formatted via `_format_retrieved_block()` so the LLM sees concise evidence instead of a noisy dump.
 
 This is intentionally a test harness — the “real product” is the memory layer.
 
@@ -299,4 +304,3 @@ pip install openai
 Scripts are numbered in the order they were ran. It is highly recommended to run them in the exact order as they are listed.
 
 ---
-
