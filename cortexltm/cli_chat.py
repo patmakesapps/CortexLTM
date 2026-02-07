@@ -48,6 +48,72 @@ def _fetch_recent_context(thread_id: str, limit: int = 9):
     return out
 
 
+def _needs_semantic_memory(user_text: str) -> bool:
+    t = (user_text or "").strip().lower()
+    if not t:
+        return False
+
+    cues = [
+        "what's my",
+        "whats my",
+        "what is my",
+        "do you remember",
+        "remember",
+        "remind me",
+        "what did i say",
+        "what did we say",
+        "earlier you said",
+        "last time",
+        "my name",
+        "who am i",
+        "what is",
+        "who is",
+        "who was",
+        "what was",
+        "what was the plan",
+        "recap",
+        "summarize",
+        "summary",
+    ]
+    return any(c in t for c in cues)
+
+
+def _should_include_summary(user_text: str) -> bool:
+    t = (user_text or "").strip().lower()
+    if not t:
+        return False
+
+    cues = [
+        "what was the plan",
+        "recap",
+        "summarize",
+        "summary",
+        "catch me up",
+        "where were we",
+        "continue",
+        "ready to continue",
+        "lets move on",
+    ]
+    return any(c in t for c in cues)
+
+
+def _format_retrieved_block(title: str, lines: list[str]) -> dict:
+    # Keep it short; this is meant to be “evidence”, not a dump.
+    clamped = []
+    for s in lines:
+        x = (s or "").strip().replace("\n", " ")
+        if not x:
+            continue
+        if len(x) > 220:
+            x = x[:220] + "…"
+        clamped.append(x)
+
+    return {
+        "role": "system",
+        "content": f"{title}:\n" + "\n".join(f"- {x}" for x in clamped[:6]),
+    }
+
+
 def assistant_llm(thread_id: str, user_text: str) -> str:
     # 1) short-term context (last N messages)
     context = _fetch_recent_context(thread_id, limit=20)
@@ -57,30 +123,15 @@ def assistant_llm(thread_id: str, user_text: str) -> str:
     if context and context[-1]["role"] == "user":
         context = context[:-1]
 
-    # 2) memory context (thread summary + master memory)
+    # 2) memory context (ONLY when needed)
     memory_msgs = []
 
-    # (a) active thread summary (episode memory)
+    needs_mem = _needs_semantic_memory(user_text)
+    wants_summary = _should_include_summary(user_text)
+
+    # fetch user_id once
+    user_id = None
     try:
-        from cortexltm.summaries import _get_active_summary  # simple v1 internal import
-
-        active = _get_active_summary(thread_id)
-        if active and (active.get("summary") or "").strip():
-            memory_msgs.append(
-                {
-                    "role": "system",
-                    "content": "THREAD SUMMARY (most recent durable context):\n"
-                    + active["summary"].strip(),
-                }
-            )
-    except Exception:
-        pass
-
-    # (b) master memory (cross-chat user memory)
-    try:
-        from cortexltm.master_memory import list_master_items
-
-        # fetch user_id for this thread
         conn = get_conn()
         try:
             with conn.cursor() as cur:
@@ -92,30 +143,80 @@ def assistant_llm(thread_id: str, user_text: str) -> str:
             user_id = str(row[0]) if row and row[0] else None
         finally:
             conn.close()
-
-        if user_id:
-            items = list_master_items(user_id=user_id, limit=5, status="active")
-            if items:
-                lines = []
-                for it in items:
-                    bucket = it.get("bucket")
-                    text = (it.get("text") or "").strip()
-                    conf = it.get("confidence")
-                    reinf = it.get("reinforcement_count")
-                    if text:
-                        lines.append(
-                            f"- [{bucket}] {text} (conf={conf:.2f}, r={reinf})"
-                        )
-                if lines:
-                    memory_msgs.append(
-                        {
-                            "role": "system",
-                            "content": "MASTER MEMORY (cross-chat durable facts):\n"
-                            + "\n".join(lines),
-                        }
-                    )
     except Exception:
-        pass
+        user_id = None
+
+    # (a) active thread summary (episode memory)  only when user asks for recap/context
+    if wants_summary:
+        try:
+            from cortexltm.summaries import _get_active_summary  # v1 internal import
+
+            active = _get_active_summary(thread_id)
+            if active and (active.get("summary") or "").strip():
+                memory_msgs.append(
+                    {
+                        "role": "system",
+                        "content": "THREAD SUMMARY:\n" + active["summary"].strip(),
+                    }
+                )
+        except Exception:
+            pass
+
+    # (b) semantic retrieval  only when needed
+    if needs_mem and user_id:
+        # 1) try MASTER memory semantic (durable)
+        try:
+            from cortexltm.master_memory import search_master_items_semantic
+
+            hits = search_master_items_semantic(
+                user_id=user_id, query=user_text, k=6, status="active"
+            )
+            lines = []
+            for h in hits:
+                txt = (h.get("text") or "").strip()
+                bucket = h.get("bucket") or "UNKNOWN"
+                if not txt:
+                    continue
+                lines.append(f"[{bucket}] {txt}")
+
+            if lines:
+                memory_msgs.append(
+                    _format_retrieved_block(
+                        "RETRIEVED MASTER MEMORY (use if relevant)", lines[:5]
+                    )
+                )
+        except Exception:
+            pass
+
+        # 2) also try EVENT semantic (raw evidence)
+        # Prefer user events and higher-importance lines to reduce junk.
+        try:
+            from cortexltm.messages import search_events_semantic
+
+            ev = search_events_semantic(
+                user_id=user_id,
+                query=user_text,
+                k=8,
+                thread_id=None,  # cross-thread for this user
+                only_actor="user",  # user-authored facts
+                min_importance=3,  # only embedded + meaningful ones
+            )
+
+            lines = []
+            for e in ev:
+                txt = (e.get("content") or "").strip()
+                if not txt:
+                    continue
+                lines.append(txt)
+
+            if lines:
+                memory_msgs.append(
+                    _format_retrieved_block(
+                        "RETRIEVED PAST USER FACTS (use if relevant)", lines[:4]
+                    )
+                )
+        except Exception:
+            pass
 
     # Put memory BEFORE the short-term chat context
     merged = memory_msgs + context

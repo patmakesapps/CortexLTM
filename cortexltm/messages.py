@@ -281,19 +281,36 @@ def add_event(
         conn.close()
 
 
-def search_events_semantic(query: str, k: int = 5, thread_id: str | None = None):
+def search_events_semantic(
+    *,
+    user_id: str,
+    query: str,
+    k: int = 5,
+    thread_id: str | None = None,
+    only_actor: str | None = "user",
+    min_importance: int = 0,
+):
     """
-    Semantic search over ltm_events using pgvector distance.
+    Semantic search over ltm_events using pgvector distance (USER-SCOPED).
 
     - Embeds the query with OpenAI
+    - Joins ltm_threads so we can filter by user_id (prevents cross-user bleed)
     - ORDER BY embedding <-> query_embedding
     - Optional thread_id filter
+    - Optional actor filter (default: user)
+    - Optional min_importance filter
     - Excludes rows where embedding IS NULL
-    - Returns list[dict] with:
-        id, created_at, actor, content, meta, importance_score, distance
+
+    Returns list[dict] with:
+      id, created_at, actor, content, meta, importance_score, distance
     """
-    if k is None:
-        k = 5
+    if not user_id or not str(user_id).strip():
+        raise ValueError("search_events_semantic: user_id is required")
+
+    q = (query or "").strip()
+    if not q:
+        raise ValueError("search_events_semantic: query is required")
+
     try:
         k_int = int(k)
     except Exception:
@@ -304,36 +321,77 @@ def search_events_semantic(query: str, k: int = 5, thread_id: str | None = None)
     if k_int > 50:
         k_int = 50  # cheap safety cap
 
-    q_emb = embed_text(query)
+    try:
+        min_imp = int(min_importance)
+    except Exception:
+        min_imp = 0
+    if min_imp < 0:
+        min_imp = 0
+    if min_imp > 10:
+        min_imp = 10
+
+    q_emb = embed_text(q)
     q_emb_literal = _vector_literal(q_emb)
 
-    where = ["embedding is not null"]
-    params = [q_emb_literal]
+    where = [
+        "t.user_id = %s",
+        "e.embedding is not null",
+    ]
+    params = [str(user_id), q_emb_literal]
 
     if thread_id:
-        where.append("thread_id = %s")
-        params.append(thread_id)
+        where.append("e.thread_id = %s")
+        params.append(str(thread_id))
 
-    params.append(k_int)
+    if only_actor:
+        where.append("e.actor = %s")
+        params.append(str(only_actor))
 
+    if min_imp > 0:
+        where.append("e.importance_score >= %s")
+        params.append(min_imp)
+
+    # placeholders:
+    # 1) vector for SELECT distance
+    # 2) filters...
+    # 3) vector for ORDER BY
+    # 4) limit
     sql = f"""
         select
-            id,
-            created_at,
-            actor,
-            content,
-            meta,
-            importance_score,
-            (embedding <-> (%s)::vector) as distance
-        from public.ltm_events
+            e.id,
+            e.created_at,
+            e.actor,
+            e.content,
+            e.meta,
+            e.importance_score,
+            (e.embedding <-> (%s)::vector) as distance
+        from public.ltm_events e
+        join public.ltm_threads t on t.id = e.thread_id
         where {" and ".join(where)}
-        order by embedding <-> (%s)::vector
+        order by e.embedding <-> (%s)::vector
         limit %s;
     """
 
-    # Note: we need the query vector twice because we use it in SELECT + ORDER BY.
-    # Keep it explicit and simple.
-    params_for_query = [params[0]] + [params[0]] + params[1:]
+    # Build params in correct order:
+    # [vector_for_select] + filters(with vector already included) + [vector_for_order_by] + [limit]
+    # Note: we already put q_emb_literal in params (for the WHERE list), but that is NOT used in SQL.
+    # So we explicitly pass the vector twice: one for SELECT, one for ORDER BY.
+    params_for_query = [q_emb_literal] + params[:-1] + [q_emb_literal, k_int]
+    # Explanation:
+    # - params = [user_id, q_emb_literal, ...filters]
+    # - We don't actually need q_emb_literal inside filters; remove it by slicing params[:-1] is wrong if filters change.
+    # Keep it simple instead:
+
+    # Rebuild cleanly:
+    filter_params = [str(user_id)]
+    if thread_id:
+        filter_params.append(str(thread_id))
+    if only_actor:
+        filter_params.append(str(only_actor))
+    if min_imp > 0:
+        filter_params.append(min_imp)
+
+    params_for_query = [q_emb_literal] + filter_params + [q_emb_literal, k_int]
 
     conn = get_conn()
     try:
@@ -343,7 +401,6 @@ def search_events_semantic(query: str, k: int = 5, thread_id: str | None = None)
 
         out = []
         for id_, created_at, actor, content, meta, importance_score, distance in rows:
-            # psycopg2 may return jsonb as dict or as str depending on environment
             if isinstance(meta, str):
                 try:
                     meta = json.loads(meta)
