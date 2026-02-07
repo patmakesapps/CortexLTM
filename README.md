@@ -68,6 +68,9 @@ If score >= 3, the event is force-embedded as an “early memory buffer”.
 ### Master-memory capture heuristics
 The auto master-memory hook now listens for general cues about ongoing work so we do not have to wait for a full rolling summary. Phrases like “project”, “learning”, “lesson”, “plan”, “vacation”, “working on”, “projects”, “memory layer”, or “memory specific” are mapped into `PROJECTS` or `LONG_RUNNING_CONTEXT` buckets and upserted immediately with metadata. That keeps facts such as your HTML project, lesson plan, or memory-layer experiment available for cross-thread semantic searches before 12 meaningful turns finish.
 
+### LLM-based extractor (v1)
+`master_memory_extractor.py` is a Groq-powered extractor that reads the most recent events for a thread, sends them to the LLM, and parses the JSON array it returns. Each claim is bucketed (projects, long-running context, profile, goals, etc.), written to `ltm_master_items`, and annotated with evidence (thread/event IDs). The extractor fires whenever a user event looks important (importance >=3), so durable facts appear in master memory even before the rolling summary threshold is reached.
+
 ### Embeddings provider (OpenAI, swappable later)
 `cortexltm/embeddings.py` provides one function:
 - `embed_text(text) -> list[float]`
@@ -92,13 +95,13 @@ Notes:
 ### Rolling summaries + episodic memory (meaningful-turn based)
 `cortexltm/summaries.py` implements automatic summary updates:
 
-**Definitions**
-- A **TURN** = user event + the next assistant event (if present)
-- A turn is “meaningful” via `is_meaningful_turn(user_text, assistant_text)`
-- When enough meaningful turns accumulate (currently **12**), we update/insert a summary row.
+- **Definitions**
+- - A **TURN** = user event + the next assistant event (if present)
+- - A turn is “meaningful” via `is_meaningful_turn(user_text, assistant_text)`
+- - When enough meaningful turns accumulate (currently **12**), we update/insert a summary row.
 
-**Current knobs (v1)**
-- `MEANINGFUL_TARGET = 12` meaningful turns required to summarize
+- **Current knobs (v1)**
+- - `MEANINGFUL_TARGET = 12` meaningful turns required to summarize
 - `FETCH_LOOKBACK = 120` max events pulled since last summary end
 - `TOPIC_SHIFT_COSINE_MIN = 0.75` threshold to split into a new episode
 

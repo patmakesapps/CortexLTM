@@ -1,6 +1,9 @@
 import json
+from typing import Optional
+
 from .db import get_conn
 from .embeddings import embed_text
+from .master_memory_extractor import extract_and_write_master_memory
 from .summaries import maybe_update_summary
 
 
@@ -121,6 +124,9 @@ PROJECT_MEMORY_CUES = [
     ("vacation", "PROJECTS"),
     ("working on", "PROJECTS"),
     ("projects", "PROJECTS"),
+    ("learn", "PROJECTS"),
+    ("language", "PROJECTS"),
+    ("coding", "PROJECTS"),
     ("memory layer", "LONG_RUNNING_CONTEXT"),
     ("memory specific", "LONG_RUNNING_CONTEXT"),
 ]
@@ -132,6 +138,20 @@ def _project_memory_bucket(content: str) -> str | None:
         if phrase in t:
             return bucket
     return None
+
+
+def _fetch_thread_user_id(thread_id: str) -> Optional[str]:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "select user_id from public.ltm_threads where id = %s limit 1;",
+                (thread_id,),
+            )
+            row = cur.fetchone()
+            return str(row[0]) if row and row[0] else None
+    finally:
+        conn.close()
 
 
 def create_thread(user_id: str, title=None):
@@ -238,35 +258,22 @@ def add_event(
         capture_forced = actor == "user" and (
             importance_score >= 5 or project_bucket is not None
         )
+        user_id: str | None = None
         if capture_forced:
-            try:
-                from .master_memory import upsert_master_item, add_master_evidence
-
-                # fetch user_id for this thread
-                conn2 = get_conn()
+            user_id = _fetch_thread_user_id(thread_id)
+            if user_id:
                 try:
-                    with conn2.cursor() as cur2:
-                        cur2.execute(
-                            "select user_id from public.ltm_threads where id = %s limit 1;",
-                            (str(thread_id),),
-                        )
-                        row = cur2.fetchone()
-                    user_id = str(row[0]) if row and row[0] else None
-                finally:
-                    conn2.close()
+                    from .master_memory import upsert_master_item, add_master_evidence
 
-                if user_id:
                     t = (content or "").strip()
-                    bucket = project_bucket
-                    if not bucket:
-                        bucket = (
-                            "PROFILE"
-                            if any(
-                                p in t.lower()
-                                for p in ["my name is", "call me ", "i am ", "i'm "]
-                            )
-                            else "LONG_RUNNING_CONTEXT"
+                    bucket = project_bucket or (
+                        "PROFILE"
+                        if any(
+                            p in t.lower()
+                            for p in ["my name is", "call me ", "i am ", "i'm "]
                         )
+                        else "LONG_RUNNING_CONTEXT"
+                    )
 
                     stored_importance = max(importance_score, 5)
                     master_id = upsert_master_item(
@@ -294,9 +301,20 @@ def add_event(
                         weight=1.0,
                         meta={"source": "auto_event_capture"},
                     )
-            except Exception:
-                # Never let memory capture break chat loop
-                pass
+                except Exception:
+                    # Never let memory capture break chat loop
+                    pass
+
+        if actor == "user" and importance_score >= 3:
+            if not user_id:
+                user_id = _fetch_thread_user_id(thread_id)
+            if user_id:
+                try:
+                    extract_and_write_master_memory(
+                        thread_id=thread_id, user_id=user_id
+                    )
+                except Exception:
+                    pass
 
         # v1: update summaries after a full turn completes (assistant written)
         if actor == "assistant":
