@@ -1,10 +1,13 @@
 import json
+import logging
 from typing import Optional
 
 from .db import get_conn
 from .embeddings import embed_text
 from .master_memory_extractor import extract_and_write_master_memory
 from .summaries import maybe_update_summary
+
+logger = logging.getLogger(__name__)
 
 
 def _score_importance(actor: str, content: str) -> int:
@@ -214,11 +217,13 @@ def add_event(
 
     # v1 auto-rating + auto-embed:
     # - If caller leaves importance_score at 0, we score it.
-    # - If importance_score >= 3, we force embed=True (early-memory buffer).
+    # - If importance_score >= 5, we force embed=True (early-memory buffer).
     if importance_score == 0:
         importance_score = _score_importance(actor, content)
 
-    if importance_score >= 3:
+    # Only embed raw events when we're very sure they're worth semantic recall.
+    # (Keeps costs down and avoids indexing normal chatter.)
+    if importance_score >= 5:
         embed = True
 
     emb = None
@@ -226,8 +231,10 @@ def add_event(
         try:
             emb = embed_text(content)
         except Exception as e:
-            print(
-                f"(warn) embedding failed; storing without embedding: {type(e).__name__}: {e}"
+            logger.warning(
+                "event embedding failed; storing without embedding: %s: %s",
+                type(e).__name__,
+                e,
             )
             emb = None
     emb_literal = _vector_literal(emb)
@@ -282,7 +289,7 @@ def add_event(
                         text=t,
                         confidence=0.70,
                         stability="med",
-                        embed=True,
+                        embed=False,
                         meta={
                             "source": "auto_event_capture",
                             "importance_score": stored_importance,
@@ -303,9 +310,14 @@ def add_event(
                     )
                 except Exception:
                     # Never let memory capture break chat loop
-                    pass
-
-        if actor == "user" and importance_score >= 3:
+                    logger.exception(
+                        "auto_event_capture failed for thread_id=%s event_id=%s",
+                        thread_id,
+                        event_id,
+                    )
+        # Run extractor sparingly (batchy) to reduce cost + junk memories.
+        # v1: only extract on very high-signal user turns.
+        if actor == "user" and importance_score >= 5:
             if not user_id:
                 user_id = _fetch_thread_user_id(thread_id)
             if user_id:
@@ -314,14 +326,18 @@ def add_event(
                         thread_id=thread_id, user_id=user_id
                     )
                 except Exception:
-                    pass
+                    logger.exception(
+                        "master memory extractor failed for thread_id=%s", thread_id
+                    )
 
         # v1: update summaries after a full turn completes (assistant written)
         if actor == "assistant":
             try:
                 maybe_update_summary(str(thread_id))
             except Exception:
-                pass
+                logger.exception(
+                    "summary update failed for thread_id=%s", thread_id
+                )
 
         return str(event_id)
 

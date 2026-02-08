@@ -36,3 +36,10 @@ create index if not exists ltm_events_thread_actor_created_at_idx
 -- Index for “show me important items first” in a thread (optional)
 create index if not exists ltm_events_thread_importance_score_created_at_idx
   on public.ltm_events (thread_id, importance_score desc, created_at desc);
+
+-- pgvector ANN index for semantic search (ORDER BY embedding <-> query)
+create index if not exists ltm_events_embedding_ivfflat_idx
+  on public.ltm_events
+  using ivfflat (embedding vector_l2_ops)
+  with (lists = 100)
+  where embedding is not null;

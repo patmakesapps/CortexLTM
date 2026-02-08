@@ -37,3 +37,10 @@ create index if not exists ltm_thread_summaries_thread_created_at_idx
 create unique index if not exists ltm_thread_summaries_one_active_per_thread
   on public.ltm_thread_summaries (thread_id)
   where is_active = true;
+
+-- pgvector ANN index for summary semantic retrieval
+create index if not exists ltm_thread_summaries_embedding_ivfflat_idx
+  on public.ltm_thread_summaries
+  using ivfflat (embedding vector_l2_ops)
+  with (lists = 50)
+  where embedding is not null;

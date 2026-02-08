@@ -53,7 +53,7 @@ Core functions:
 - `add_event(thread_id, actor, content, meta, importance_score=0, embed=False)`
   - Writes into `ltm_events`
   - Auto-scores **user** messages if caller leaves `importance_score=0`
-  - Auto-embeds events when importance is high (>=3)
+  - Auto-embeds events when importance is high (>=5)
   - After an **assistant** event is written, it triggers `maybe_update_summary()`
 
 ### Importance scoring (v1 heuristic)
@@ -63,13 +63,13 @@ A lightweight scoring function `_score_importance()` categorizes user messages:
 - `1` = preferences / durable details
 - `0` = trivial chatter
 
-If score >= 3, the event is force-embedded as an “early memory buffer”.
+If score >= 5, the event is force-embedded as an “early memory buffer”.
 
 ### Master-memory capture heuristics
-The auto master-memory hook now listens for general cues about ongoing work so we do not have to wait for a full rolling summary. Phrases like “project”, “learning”, “lesson”, “plan”, “vacation”, “working on”, “projects”, “memory layer”, or “memory specific” are mapped into `PROJECTS` or `LONG_RUNNING_CONTEXT` buckets and upserted immediately with metadata. That keeps facts such as your HTML project, lesson plan, or memory-layer experiment available for cross-thread semantic searches before 12 meaningful turns finish.
+The auto master-memory hook now listens for general cues about ongoing work so we do not have to wait for a full rolling summary. Phrases like “project”, “learning”, “lesson”, “plan”, “vacation”, “working on”, “projects”, “memory layer”, or “memory specific” are mapped into `PROJECTS` or `LONG_RUNNING_CONTEXT` buckets and upserted immediately with metadata. That keeps facts available for cross-thread semantic searches before 12 meaningful turns finish.
 
 ### LLM-based extractor (v1)
-`master_memory_extractor.py` is a Groq-powered extractor that reads the most recent events for a thread, sends them to the LLM, and parses the JSON array it returns. Each claim is bucketed (projects, long-running context, profile, goals, etc.), written to `ltm_master_items`, and annotated with evidence (thread/event IDs). The extractor fires whenever a user event looks important (importance >=3), so durable facts appear in master memory even before the rolling summary threshold is reached.
+`master_memory_extractor.py` is a Groq-powered extractor that reads the most recent events for a thread, sends them to the LLM, and parses the JSON array it returns. Each claim is bucketed (projects, long-running context, profile, goals, etc.), written to `ltm_master_items`, and annotated with evidence (thread/event IDs). The extractor fires whenever a user event looks highly important (importance >=5), so durable facts appear in master memory even before the rolling summary threshold is reached.
 
 ### Embeddings provider (OpenAI, swappable later)
 `cortexltm/embeddings.py` provides one function:

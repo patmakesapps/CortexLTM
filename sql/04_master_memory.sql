@@ -8,7 +8,7 @@
 -- -----------------------------
 -- 1) updated_at trigger helper
 -- -----------------------------
-create function public.set_updated_at()
+create or replace function public.set_updated_at()
 returns trigger as $$
 begin
   new.updated_at = now();
@@ -19,7 +19,7 @@ $$ language plpgsql;
 -- -----------------------------
 -- 2) Master Memory Items (atomic claims)
 -- -----------------------------
-create table public.ltm_master_items (
+create table if not exists public.ltm_master_items (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
@@ -83,24 +83,32 @@ create table public.ltm_master_items (
   )
 );
 
+drop trigger if exists trg_ltm_master_items_updated_at on public.ltm_master_items;
 create trigger trg_ltm_master_items_updated_at
 before update on public.ltm_master_items
 for each row execute function public.set_updated_at();
 
 -- Indexes for retrieval
-create index ltm_master_items_user_bucket_status_idx
+create index if not exists ltm_master_items_user_bucket_status_idx
   on public.ltm_master_items (user_id, bucket, status);
 
-create index ltm_master_items_user_updated_at_idx
+create index if not exists ltm_master_items_user_updated_at_idx
   on public.ltm_master_items (user_id, updated_at desc);
 
-create index ltm_master_items_user_confidence_idx
+create index if not exists ltm_master_items_user_confidence_idx
   on public.ltm_master_items (user_id, confidence desc);
+
+-- pgvector ANN index for master memory semantic retrieval
+create index if not exists ltm_master_items_embedding_ivfflat_idx
+  on public.ltm_master_items
+  using ivfflat (embedding vector_l2_ops)
+  with (lists = 100)
+  where embedding is not null;
 
 -- -----------------------------
 -- 3) Evidence table (audit trail)
 -- -----------------------------
-create table public.ltm_master_evidence (
+create table if not exists public.ltm_master_evidence (
   id uuid primary key default gen_random_uuid(),
   created_at timestamptz not null default now(),
 
@@ -123,14 +131,14 @@ create table public.ltm_master_evidence (
   )
 );
 
-create index ltm_master_evidence_master_item_idx
+create index if not exists ltm_master_evidence_master_item_idx
   on public.ltm_master_evidence (master_item_id);
 
-create index ltm_master_evidence_thread_idx
+create index if not exists ltm_master_evidence_thread_idx
   on public.ltm_master_evidence (thread_id);
 
-create index ltm_master_evidence_event_idx
+create index if not exists ltm_master_evidence_event_idx
   on public.ltm_master_evidence (event_id);
 
-create index ltm_master_evidence_summary_idx
+create index if not exists ltm_master_evidence_summary_idx
   on public.ltm_master_evidence (summary_id);

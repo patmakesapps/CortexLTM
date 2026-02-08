@@ -1,4 +1,5 @@
 import os
+import logging
 from dotenv import load_dotenv
 
 from cortexltm.messages import create_thread, add_event
@@ -6,6 +7,8 @@ from cortexltm.db import get_conn
 from cortexltm.llm import chat_reply
 
 load_dotenv(override=True)
+
+logger = logging.getLogger(__name__)
 
 
 MAX_USER_CHARS = 2000
@@ -66,10 +69,6 @@ def _needs_semantic_memory(user_text: str) -> bool:
         "last time",
         "my name",
         "who am i",
-        "what is",
-        "who is",
-        "who was",
-        "what was",
         "what was the plan",
         "recap",
         "summarize",
@@ -144,6 +143,7 @@ def assistant_llm(thread_id: str, user_text: str) -> str:
         finally:
             conn.close()
     except Exception:
+        logger.exception("failed to fetch user_id for thread_id=%s", thread_id)
         user_id = None
 
     # (a) active thread summary (episode memory)  only when user asks for recap/context
@@ -160,7 +160,7 @@ def assistant_llm(thread_id: str, user_text: str) -> str:
                     }
                 )
         except Exception:
-            pass
+            logger.exception("failed to load active summary for thread_id=%s", thread_id)
 
     # (b) semantic retrieval  only when needed
     if needs_mem and user_id:
@@ -186,7 +186,7 @@ def assistant_llm(thread_id: str, user_text: str) -> str:
                     )
                 )
         except Exception:
-            pass
+            logger.exception("master semantic retrieval failed for user_id=%s", user_id)
 
         # 2) also try EVENT semantic (raw evidence)
         # Prefer user events and higher-importance lines to reduce junk.
@@ -216,7 +216,7 @@ def assistant_llm(thread_id: str, user_text: str) -> str:
                     )
                 )
         except Exception:
-            pass
+            logger.exception("event semantic retrieval failed for user_id=%s", user_id)
 
     # Put memory BEFORE the short-term chat context
     merged = memory_msgs + context

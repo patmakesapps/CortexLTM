@@ -1,6 +1,8 @@
 # cortexltm/summaries.py
 import json
+import logging
 import math
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from .llm import summarize_update
@@ -8,10 +10,45 @@ from .llm import summarize_update
 from .db import get_conn
 from .embeddings import embed_text
 
+logger = logging.getLogger(__name__)
+
 # --- v1 knobs (keep simple) ---
 MEANINGFUL_TARGET = 12  # lower threshold so shorter sessions produce summaries
 FETCH_LOOKBACK = 120  # pull up to N events since last summary end
 TOPIC_SHIFT_COSINE_MIN = 0.75  # lower => more likely new topic
+MIN_SUMMARY_UPDATE_SECONDS = 180  # debounce summary writes/embeddings
+
+
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_ts(raw: Any) -> Optional[datetime]:
+    if raw is None:
+        return None
+    try:
+        s = str(raw).strip()
+        if not s:
+            return None
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _should_debounce_summary(active_summary: Optional[Dict[str, Any]]) -> bool:
+    if not active_summary:
+        return False
+
+    meta = active_summary.get("meta") if isinstance(active_summary, dict) else None
+    if not isinstance(meta, dict):
+        return False
+
+    last_write_at = _parse_iso_ts(meta.get("last_summary_write_at"))
+    if not last_write_at:
+        return False
+
+    age = datetime.now(timezone.utc) - last_write_at
+    return age < timedelta(seconds=MIN_SUMMARY_UPDATE_SECONDS)
 
 
 def _sync_master_from_active_summary(thread_id: str) -> None:
@@ -51,21 +88,26 @@ def _sync_master_from_active_summary(thread_id: str) -> None:
         if not user_id:
             return
 
-        # Very small, stable master item (avoid dumping huge text)
+        # Stable text key keeps this to one cross-chat item per thread.
+        # Put the changing summary excerpt in meta to avoid duplicate upserts.
         compact = summary_text.replace("\n", " ").strip()
         if len(compact) > 220:
             compact = compact[:220] + "…"
 
-        master_text = f"CortexLTM thread summary: {compact}"
+        master_text = f"Thread summary reference ({thread_id})"
 
         master_id = upsert_master_item(
             user_id=user_id,
-            bucket="PROJECTS",
+            bucket="LONG_RUNNING_CONTEXT",
             text=master_text,
             confidence=0.55,
             stability="med",
-            embed=True,
-            meta={"source": "auto_summary_wire"},
+            embed=False,
+            meta={
+                "source": "auto_summary_wire",
+                "summary_id": str(summary_id),
+                "summary_excerpt": compact,
+            },
         )
 
         add_master_evidence(
@@ -77,6 +119,7 @@ def _sync_master_from_active_summary(thread_id: str) -> None:
         )
     except Exception:
         # Never let master-memory wiring break the chat loop
+        logger.exception("summary->master sync failed for thread_id=%s", thread_id)
         return
 
 
@@ -392,8 +435,11 @@ def _insert_active_summary(
     end_event_id: Optional[str],
     meta: Dict[str, Any],
     embed: bool = True,
+    summary_embedding: Optional[List[float]] = None,
 ) -> str:
-    emb = embed_text(summary_text) if embed else None
+    emb = None
+    if embed:
+        emb = summary_embedding if summary_embedding is not None else embed_text(summary_text)
     emb_literal = _vector_literal(emb)
 
     conn = get_conn()
@@ -432,8 +478,11 @@ def _update_active_summary(
     end_event_id: Optional[str],
     meta_patch: Dict[str, Any],
     embed: bool = True,
+    summary_embedding: Optional[List[float]] = None,
 ) -> None:
-    emb = embed_text(summary_text) if embed else None
+    emb = None
+    if embed:
+        emb = summary_embedding if summary_embedding is not None else embed_text(summary_text)
     emb_literal = _vector_literal(emb)
 
     conn = get_conn()
@@ -470,7 +519,7 @@ def maybe_update_summary(thread_id: str) -> bool:
     v1 behavior:
     - Count meaningful TURNS since last summary end.
       TURN = user event + next assistant event (if present).
-    - When we have 30 meaningful turns:
+    - When we have MEANINGFUL_TARGET meaningful turns:
         - Build candidate summary text (simple heuristic)
         - Topic-shift check using cosine similarity of summary embeddings
         - If shift: archive old active + insert new active
@@ -478,6 +527,10 @@ def maybe_update_summary(thread_id: str) -> bool:
     Returns True if we wrote/updated a summary row.
     """
     active = _get_active_summary(thread_id)
+    if _should_debounce_summary(active):
+        logger.debug("summary update debounced for thread_id=%s", thread_id)
+        return False
+
     since_event_id = active["range_end_event_id"] if active else None
 
     events = _fetch_events_since(thread_id, since_event_id)
@@ -517,8 +570,12 @@ def maybe_update_summary(thread_id: str) -> bool:
                 break
 
         i += 1
-    # debug: print once per maybe_update_summary() call
-    print(f"(info) meaningful_turns={len(meaningful_turns)}/{MEANINGFUL_TARGET}")
+    logger.debug(
+        "meaningful_turns=%s/%s for thread_id=%s",
+        len(meaningful_turns),
+        MEANINGFUL_TARGET,
+        thread_id,
+    )
 
     if len(meaningful_turns) < MEANINGFUL_TARGET:
         return False
@@ -546,14 +603,21 @@ def maybe_update_summary(thread_id: str) -> bool:
 
     # decide topic shift (v1 = embedding similarity)
     topic_shift = False
+    candidate_emb: Optional[List[float]] = None
     if prior_summary:
         try:
             a_emb = embed_text(prior_summary)
-            b_emb = embed_text(candidate)
-            sim = _cosine_similarity(a_emb, b_emb)
+            candidate_emb = embed_text(candidate)
+            sim = _cosine_similarity(a_emb, candidate_emb)
             topic_shift = sim < TOPIC_SHIFT_COSINE_MIN
-        except Exception:
+        except Exception as e:
             # if embeddings fail, fall back to "no shift" to avoid fragmentation
+            logger.warning(
+                "topic-shift embedding check failed for thread_id=%s: %s: %s",
+                thread_id,
+                type(e).__name__,
+                e,
+            )
             topic_shift = False
 
     if not active:
@@ -562,8 +626,13 @@ def maybe_update_summary(thread_id: str) -> bool:
             summary_text=candidate,
             start_event_id=start_event_id,
             end_event_id=end_event_id,
-            meta={"reason": "init", "meaningful_turns": MEANINGFUL_TARGET},
+            meta={
+                "reason": "init",
+                "meaningful_turns": MEANINGFUL_TARGET,
+                "last_summary_write_at": _utcnow_iso(),
+            },
             embed=True,
+            summary_embedding=candidate_emb,
         )
 
         # v1 wiring: write one master item from the active summary
@@ -582,7 +651,11 @@ def maybe_update_summary(thread_id: str) -> bool:
             summary_text=episode_text,
             start_event_id=start_event_id,
             end_event_id=end_event_id,
-            meta={"reason": "topic_shift", "meaningful_turns": MEANINGFUL_TARGET},
+            meta={
+                "reason": "topic_shift",
+                "meaningful_turns": MEANINGFUL_TARGET,
+                "last_summary_write_at": _utcnow_iso(),
+            },
             embed=True,
         )
 
@@ -594,10 +667,13 @@ def maybe_update_summary(thread_id: str) -> bool:
         thread_id=thread_id,
         summary_text=candidate,
         end_event_id=end_event_id,
-        meta_patch={"reason": "rolling_update", "meaningful_turns": MEANINGFUL_TARGET},
+        meta_patch={
+            "reason": "rolling_update",
+            "meaningful_turns": MEANINGFUL_TARGET,
+            "last_summary_write_at": _utcnow_iso(),
+        },
         embed=True,
+        summary_embedding=candidate_emb,
     )
-
-    _sync_master_from_active_summary(thread_id)
 
     return True
