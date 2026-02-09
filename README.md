@@ -2,6 +2,10 @@
 
 CortexLTM is a **schema-driven long-term memory layer** for LLM apps/agents.
 
+## Video walkthrough
+
+[![CortexLTM video walkthrough thumbnail](CortexLTM.png)](https://youtu.be/Efa-n6bWVzE?si=81STTdWayP0wizk1)
+
 **Goal:** give any chat app a clean, swappable “memory backend” that supports:
 - **Threaded conversations**
 - **Event logging**
