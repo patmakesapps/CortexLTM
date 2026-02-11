@@ -3,10 +3,11 @@ import re
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from .db import get_conn
+from .llm import chat_reply
 from .messages import add_event, create_thread
 
 SUMMARY_CUE_REGEX = re.compile(
@@ -33,6 +34,11 @@ class EventCreateRequest(BaseModel):
 
 class MemoryContextRequest(BaseModel):
     latest_user_text: str
+    short_term_limit: int | None = Field(default=30, ge=1, le=200)
+
+
+class ChatRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=6000)
     short_term_limit: int | None = Field(default=30, ge=1, le=200)
 
 
@@ -174,6 +180,36 @@ def _get_semantic_memories(thread_id: str, limit: int) -> list[str]:
         conn.close()
 
 
+def _build_memory_context(
+    thread_id: str, latest_user_text: str, short_term_limit: int | None
+) -> list[dict[str, str]]:
+    context: list[dict[str, str]] = []
+
+    if SUMMARY_CUE_REGEX.search(latest_user_text):
+        summary = _get_active_summary(thread_id)
+        if summary:
+            context.append({"role": "system", "content": f"Active summary:\n{summary}"})
+
+    if SEMANTIC_CUE_REGEX.search(latest_user_text):
+        semantic = _get_semantic_memories(thread_id, 5)
+        if semantic:
+            context.append(
+                {
+                    "role": "system",
+                    "content": "Relevant long-term memory:\n" + "\n- ".join(semantic),
+                }
+            )
+
+    recent = _query_events(
+        thread_id=thread_id,
+        limit=_normalize_limit(short_term_limit, 30, 200),
+    )
+    for message in recent:
+        context.append({"role": message["role"], "content": message["content"]})
+
+    return context
+
+
 @app.get("/health")
 def health_check() -> dict[str, str]:
     return {"status": "ok"}
@@ -241,28 +277,58 @@ def build_memory_context_route(
     x_api_key: str | None = Header(default=None),
 ) -> dict[str, Any]:
     _validate_api_key(x_api_key)
-    context: list[dict[str, str]] = []
+    context = _build_memory_context(
+        thread_id=thread_id,
+        latest_user_text=payload.latest_user_text,
+        short_term_limit=payload.short_term_limit,
+    )
+    return {"thread_id": thread_id, "messages": context}
 
-    if SUMMARY_CUE_REGEX.search(payload.latest_user_text):
-        summary = _get_active_summary(thread_id)
-        if summary:
-            context.append({"role": "system", "content": f"Active summary:\n{summary}"})
 
-    if SEMANTIC_CUE_REGEX.search(payload.latest_user_text):
-        semantic = _get_semantic_memories(thread_id, 5)
-        if semantic:
-            context.append(
-                {
-                    "role": "system",
-                    "content": "Relevant long-term memory:\n" + "\n- ".join(semantic),
-                }
+@app.post("/v1/threads/{thread_id}/chat")
+def chat_route(
+    thread_id: str,
+    payload: ChatRequest,
+    x_api_key: str | None = Header(default=None),
+) -> Response:
+    _validate_api_key(x_api_key)
+
+    text = payload.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Message text is required.")
+
+    try:
+        add_event(thread_id=thread_id, actor="user", content=text, meta={"source": "chatui"})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to persist user event: {exc}")
+
+    try:
+        context = _build_memory_context(
+            thread_id=thread_id,
+            latest_user_text=text,
+            short_term_limit=payload.short_term_limit,
+        )
+        if (
+            context
+            and context[-1].get("role") == "user"
+            and context[-1].get("content", "").strip() == text
+        ):
+            context = context[:-1]
+        assistant_text = chat_reply(user_text=text, context_messages=context)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate assistant reply: {exc}")
+
+    if assistant_text.strip():
+        try:
+            add_event(
+                thread_id=thread_id,
+                actor="assistant",
+                content=assistant_text,
+                meta={"source": "chatui_llm"},
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500, detail=f"Failed to persist assistant event: {exc}"
             )
 
-    recent = _query_events(
-        thread_id=thread_id,
-        limit=_normalize_limit(payload.short_term_limit, 30, 200),
-    )
-    for message in recent:
-        context.append({"role": message["role"], "content": message["content"]})
-
-    return {"thread_id": thread_id, "messages": context}
+    return Response(content=assistant_text, media_type="text/plain; charset=utf-8")
