@@ -304,6 +304,12 @@ pip install psycopg2-binary ----- version 2.9.11
 pip install openai
 ```
 
+9) Install API server dependencies (for UI integration) -
+
+```powershell
+pip install fastapi uvicorn
+```
+
 ---
 
 ## Run Scripts in sql folder
@@ -311,3 +317,14 @@ pip install openai
 Scripts are numbered in the order they were ran. It is highly recommended to run them in the exact order as they are listed.
 
 ---
+
+## Run CortexLTM API (for CortexUI)
+
+Start the HTTP API layer so UI clients can call CortexLTM instead of writing SQL directly:
+
+```powershell
+uvicorn cortexltm.api:app --host 0.0.0.0 --port 8000
+```
+
+Optional env vars:
+- `CORTEXLTM_API_KEY` (if set, clients must send this value as `x-api-key`)
