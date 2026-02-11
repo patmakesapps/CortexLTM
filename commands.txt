@@ -1,5 +1,27 @@
-# activate the .venv
+# CortexLTM commands (run from repo root)
+
+# Prereqs (tested)
+# Python 3.12.x (tested: 3.12.10)
+
+# 1) Create and activate virtual environment
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 
-# run cli chat for testing
- python -m cortexltm.cli_chat
+# 2) Install dependencies
+.\.venv\Scripts\python -m pip install groq python-dotenv psycopg2-binary==2.9.11 openai fastapi uvicorn
+
+# 3) Quick health check (imports + API app)
+echo from fastapi.testclient import TestClient> _api_smoke.py
+echo from cortexltm.api import app>> _api_smoke.py
+echo c=TestClient(app)>> _api_smoke.py
+echo r=c.get('/health')>> _api_smoke.py
+echo print(r.status_code)>> _api_smoke.py
+echo print(r.json())>> _api_smoke.py
+.\.venv\Scripts\python _api_smoke.py
+del _api_smoke.py
+
+# 4) Run API for CortexUI
+.\.venv\Scripts\python -m uvicorn cortexltm.api:app --host 0.0.0.0 --port 8000
+
+# 5) Optional CLI chat harness
+.\.venv\Scripts\python -m cortexltm.cli_chat
