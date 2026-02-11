@@ -3,10 +3,11 @@ import re
 from datetime import datetime
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Query, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from .db import get_conn
+from .db import DatabaseUnavailableError, get_conn
 from .llm import chat_reply
 from .messages import add_event, create_thread
 
@@ -19,6 +20,13 @@ SEMANTIC_CUE_REGEX = re.compile(
 )
 
 app = FastAPI(title="CortexLTM API", version="0.1.0")
+
+
+@app.exception_handler(DatabaseUnavailableError)
+def handle_db_unavailable(
+    _request: Request, exc: DatabaseUnavailableError
+) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 class ThreadCreateRequest(BaseModel):
