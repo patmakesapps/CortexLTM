@@ -328,3 +328,19 @@ uvicorn cortexltm.api:app --host 0.0.0.0 --port 8000
 
 Optional env vars:
 - `CORTEXLTM_API_KEY` (if set, clients must send this value as `x-api-key`)
+- `AUTH_MODE` (`dev` or `supabase`, default `dev`)
+- `SUPABASE_URL` (required in `AUTH_MODE=supabase`)
+- `SUPABASE_ANON_KEY` (required in `AUTH_MODE=supabase`)
+
+## API Auth Modes
+
+- `AUTH_MODE=dev`
+  - Existing behavior for open-source local development.
+  - `/v1/*` routes do not require bearer tokens.
+  - If `CORTEXLTM_API_KEY` is set, `x-api-key` is still enforced.
+
+- `AUTH_MODE=supabase`
+  - `/v1/*` routes require `Authorization: Bearer <supabase_access_token>`.
+  - Token validity is checked against `SUPABASE_URL/auth/v1/user`.
+  - Thread-scoped routes verify thread ownership against authenticated `user_id`.
+  - `user_id` query/body values from clients are ignored in favor of auth identity.

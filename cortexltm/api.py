@@ -1,5 +1,8 @@
 import os
 import re
+import json
+import urllib.error
+import urllib.request
 from datetime import datetime
 from typing import Any
 
@@ -30,7 +33,7 @@ def handle_db_unavailable(
 
 
 class ThreadCreateRequest(BaseModel):
-    user_id: str
+    user_id: str | None = None
     title: str | None = None
 
 
@@ -56,6 +59,75 @@ def _validate_api_key(x_api_key: str | None) -> None:
         return
     if x_api_key != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _extract_bearer_token(authorization: str | None) -> str | None:
+    if not authorization:
+        return None
+    raw = authorization.strip()
+    if not raw:
+        return None
+    if raw.lower().startswith("bearer "):
+        token = raw[7:].strip()
+        return token or None
+    return None
+
+
+def _fetch_supabase_user_id(access_token: str) -> str:
+    supabase_url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
+    supabase_anon_key = (os.getenv("SUPABASE_ANON_KEY") or "").strip()
+    if not supabase_url or not supabase_anon_key:
+        raise HTTPException(
+            status_code=500,
+            detail="SUPABASE_URL and SUPABASE_ANON_KEY are required in AUTH_MODE=supabase.",
+        )
+
+    req = urllib.request.Request(
+        f"{supabase_url}/auth/v1/user",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "apikey": supabase_anon_key,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as res:
+            body = res.read().decode("utf-8")
+    except urllib.error.HTTPError:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token.")
+    except Exception:
+        raise HTTPException(status_code=503, detail="Auth provider unavailable.")
+
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=503, detail="Auth provider returned invalid JSON.")
+
+    user_id = payload.get("id")
+    if not isinstance(user_id, str) or not user_id.strip():
+        raise HTTPException(status_code=401, detail="Access token missing user id.")
+    return user_id.strip()
+
+
+def _authorize_request(
+    x_api_key: str | None, authorization: str | None
+) -> str | None:
+    _validate_api_key(x_api_key)
+    auth_mode = (os.getenv("AUTH_MODE") or "dev").strip().lower()
+    if auth_mode != "supabase":
+        return None
+
+    token = _extract_bearer_token(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Bearer token required.")
+    return _fetch_supabase_user_id(token)
+
+
+def _resolve_effective_user_id(requested_user_id: str | None, auth_user_id: str | None) -> str:
+    if auth_user_id:
+        return auth_user_id
+    if not requested_user_id or not requested_user_id.strip():
+        raise HTTPException(status_code=400, detail="user_id is required.")
+    return requested_user_id.strip()
 
 
 def _normalize_limit(raw_limit: int | None, default: int, cap: int) -> int:
@@ -134,6 +206,28 @@ def _query_events(thread_id: str, limit: int) -> list[dict[str, Any]]:
                 }
             )
         return out
+    finally:
+        conn.close()
+
+
+def _assert_thread_owner(thread_id: str, auth_user_id: str | None) -> None:
+    if not auth_user_id:
+        return
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select 1
+                from public.ltm_threads
+                where id = %s and user_id = %s
+                limit 1;
+                """,
+                (thread_id, auth_user_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Thread not found.")
     finally:
         conn.close()
 
@@ -225,22 +319,29 @@ def health_check() -> dict[str, str]:
 
 @app.post("/v1/threads")
 def create_thread_route(
-    payload: ThreadCreateRequest, x_api_key: str | None = Header(default=None)
+    payload: ThreadCreateRequest,
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
-    _validate_api_key(x_api_key)
-    thread_id = create_thread(payload.user_id, payload.title)
-    return {"thread_id": thread_id}
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    user_id = _resolve_effective_user_id(payload.user_id, auth_user_id)
+    thread_id = create_thread(user_id, payload.title)
+    return {"thread_id": thread_id, "user_id": user_id}
 
 
 @app.get("/v1/threads")
 def list_threads_route(
-    user_id: str = Query(...),
+    user_id: str | None = Query(default=None),
     limit: int = Query(50),
     x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _validate_api_key(x_api_key)
-    rows = _query_threads(user_id=user_id, limit=_normalize_limit(limit, 50, 200))
-    return {"threads": rows}
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    effective_user_id = _resolve_effective_user_id(user_id, auth_user_id)
+    rows = _query_threads(
+        user_id=effective_user_id, limit=_normalize_limit(limit, 50, 200)
+    )
+    return {"threads": rows, "user_id": effective_user_id}
 
 
 @app.get("/v1/threads/{thread_id}/events")
@@ -248,8 +349,10 @@ def list_events_route(
     thread_id: str,
     limit: int = Query(100),
     x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _validate_api_key(x_api_key)
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
     events = _query_events(thread_id=thread_id, limit=_normalize_limit(limit, 100, 200))
     return {"thread_id": thread_id, "messages": events}
 
@@ -259,8 +362,10 @@ def create_event_route(
     thread_id: str,
     payload: EventCreateRequest,
     x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, str]:
-    _validate_api_key(x_api_key)
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
     event_id = add_event(
         thread_id=thread_id,
         actor=payload.actor,
@@ -272,9 +377,12 @@ def create_event_route(
 
 @app.get("/v1/threads/{thread_id}/summary")
 def get_summary_route(
-    thread_id: str, x_api_key: str | None = Header(default=None)
+    thread_id: str,
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _validate_api_key(x_api_key)
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
     return {"thread_id": thread_id, "summary": _get_active_summary(thread_id)}
 
 
@@ -283,8 +391,10 @@ def build_memory_context_route(
     thread_id: str,
     payload: MemoryContextRequest,
     x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    _validate_api_key(x_api_key)
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
     context = _build_memory_context(
         thread_id=thread_id,
         latest_user_text=payload.latest_user_text,
@@ -298,8 +408,10 @@ def chat_route(
     thread_id: str,
     payload: ChatRequest,
     x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
 ) -> Response:
-    _validate_api_key(x_api_key)
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
 
     text = payload.text.strip()
     if not text:
