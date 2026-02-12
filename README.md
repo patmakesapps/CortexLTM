@@ -2,6 +2,15 @@
 
 CortexLTM is a **schema-driven long-term memory layer** for LLM apps/agents.
 
+## Release Notes (Feb 2026)
+
+- Added API auth mode support:
+  - `AUTH_MODE=dev` for local/open-source contributor workflows.
+  - `AUTH_MODE=supabase` for bearer-token-protected API usage.
+- Added Supabase token validation on `/v1/*` API routes.
+- Added thread ownership enforcement for authenticated users.
+- Updated env/docs to include `SUPABASE_URL` and `SUPABASE_ANON_KEY` for auth mode.
+
 ## Video walkthrough
 
 [![CortexLTM video walkthrough thumbnail](CortexLTM.png)](https://youtu.be/Efa-n6bWVzE?si=81STTdWayP0wizk1)
