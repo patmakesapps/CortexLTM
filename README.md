@@ -10,6 +10,9 @@ CortexLTM is a **schema-driven long-term memory layer** for LLM apps/agents.
 - Added Supabase token validation on `/v1/*` API routes.
 - Added thread ownership enforcement for authenticated users.
 - Updated env/docs to include `SUPABASE_URL` and `SUPABASE_ANON_KEY` for auth mode.
+- Added canonical soul contract files under `soul/` (`SOUL.md` + `soul.yaml`) for cross-model behavior consistency.
+- Added soul-contract injection into `chat_reply()` with optional `CORTEX_SOUL_SPEC_PATH` override.
+- Hardened thread deletion flow to remove dependent `ltm_master_evidence` rows before thread delete.
 
 ## Video walkthrough
 
@@ -163,6 +166,7 @@ This is intentionally a test harness — the “real product” is the memory la
 
 ## Repo layout (current)
 - `cortexltm/`
+  - `api.py` - FastAPI routes for threads/events/context/chat
   - `db.py` — Postgres connection via `SUPABASE_DB_URL`
   - `embeddings.py` — OpenAI embedding wrapper
   - `llm.py` — Groq wrapper for chat + summarization
@@ -170,6 +174,9 @@ This is intentionally a test harness — the “real product” is the memory la
   - `messages.py` — thread/event helpers + semantic search
   - `cli_chat.py` — CLI harness
   - `__init__.py` — version metadata
+- `soul/`
+  - `SOUL.md` - canonical human-readable personality contract
+  - `soul.yaml` - machine-readable behavior policy contract
 - `sql/`
   - `00_extensions.sql`
   - `01_threads.sql`
@@ -192,6 +199,7 @@ Optional:
 - `OPENAI_EMBED_MODEL` (default `text-embedding-3-small`)
 - `GROQ_CHAT_MODEL` (default `llama-3.1-8b-instant`)
 - `GROQ_SUMMARY_MODEL` (default `llama-3.1-8b-instant`)
+- `CORTEX_SOUL_SPEC_PATH` (path override for soul spec; defaults to `soul/SOUL.md`)
 
 ---
 
