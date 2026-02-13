@@ -37,6 +37,10 @@ class ThreadCreateRequest(BaseModel):
     title: str | None = None
 
 
+class ThreadRenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
 class EventCreateRequest(BaseModel):
     actor: str = Field(pattern="^(user|assistant)$")
     content: str = Field(min_length=1, max_length=6000)
@@ -232,6 +236,68 @@ def _assert_thread_owner(thread_id: str, auth_user_id: str | None) -> None:
         conn.close()
 
 
+def _rename_thread(thread_id: str, title: str) -> None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update public.ltm_threads
+                set title = %s
+                where id = %s;
+                """,
+                (title, thread_id),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Thread not found.")
+            conn.commit()
+    finally:
+        conn.close()
+
+
+def _delete_thread(thread_id: str, auth_user_id: str | None) -> bool:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if auth_user_id:
+                cur.execute(
+                    """
+                    delete from public.ltm_threads
+                    where id = %s and user_id = %s;
+                    """,
+                    (thread_id, auth_user_id),
+                )
+                if cur.rowcount > 0:
+                    conn.commit()
+                    return True
+                cur.execute(
+                    """
+                    select 1
+                    from public.ltm_threads
+                    where id = %s
+                    limit 1;
+                    """,
+                    (thread_id,),
+                )
+                if cur.fetchone():
+                    raise HTTPException(status_code=404, detail="Thread not found.")
+                return False
+
+            cur.execute(
+                """
+                delete from public.ltm_threads
+                where id = %s;
+                """,
+                (thread_id,),
+            )
+            deleted = cur.rowcount > 0
+            if deleted:
+                conn.commit()
+            return deleted
+    finally:
+        conn.close()
+
+
 def _get_active_summary(thread_id: str) -> str | None:
     conn = get_conn()
     try:
@@ -355,6 +421,33 @@ def list_events_route(
     _assert_thread_owner(thread_id, auth_user_id)
     events = _query_events(thread_id=thread_id, limit=_normalize_limit(limit, 100, 200))
     return {"thread_id": thread_id, "messages": events}
+
+
+@app.patch("/v1/threads/{thread_id}")
+def rename_thread_route(
+    thread_id: str,
+    payload: ThreadRenameRequest,
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="title is required.")
+    _rename_thread(thread_id, title)
+    return {"thread_id": thread_id, "title": title, "ok": True}
+
+
+@app.delete("/v1/threads/{thread_id}")
+def delete_thread_route(
+    thread_id: str,
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    deleted = _delete_thread(thread_id, auth_user_id)
+    return {"thread_id": thread_id, "ok": True, "deleted": deleted}
 
 
 @app.post("/v1/threads/{thread_id}/events")
