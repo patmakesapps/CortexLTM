@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from .db import DatabaseUnavailableError, get_conn
 from .llm import chat_reply
 from .messages import add_event, create_thread
+from .summaries import force_update_summary
 
 SUMMARY_CUE_REGEX = re.compile(
     r"\b(recap|summari[sz]e|catch me up|where were we|continue)\b", re.IGNORECASE
@@ -157,7 +158,7 @@ def _query_threads(user_id: str, limit: int) -> list[dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                select id, user_id, title, created_at
+                select id, user_id, title, created_at, meta
                 from public.ltm_threads
                 where user_id = %s
                 order by created_at desc
@@ -167,16 +168,25 @@ def _query_threads(user_id: str, limit: int) -> list[dict[str, Any]]:
             )
             rows = cur.fetchall()
         return [
-            {
-                "id": str(id_),
-                "user_id": str(user_id_),
-                "title": title,
-                "created_at": _to_iso(created_at),
-            }
-            for id_, user_id_, title, created_at in rows
+            _thread_row_to_payload(id_, user_id_, title, created_at, meta)
+            for id_, user_id_, title, created_at, meta in rows
         ]
     finally:
         conn.close()
+
+
+def _thread_row_to_payload(
+    id_: Any, user_id_: Any, title: Any, created_at: Any, meta: Any
+) -> dict[str, Any]:
+    data = meta if isinstance(meta, dict) else {}
+    is_core_memory = bool(data.get("is_core_memory"))
+    return {
+        "id": str(id_),
+        "user_id": str(user_id_),
+        "title": title,
+        "created_at": _to_iso(created_at),
+        "is_core_memory": is_core_memory,
+    }
 
 
 def _query_events(thread_id: str, limit: int) -> list[dict[str, Any]]:
@@ -323,6 +333,33 @@ def _get_active_summary(thread_id: str) -> str | None:
         conn.close()
 
 
+def _mark_thread_core_memory(thread_id: str) -> None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                update public.ltm_threads
+                set meta = coalesce(meta, '{}'::jsonb) || %s::jsonb
+                where id = %s;
+                """,
+                (
+                    json.dumps(
+                        {
+                            "is_core_memory": True,
+                            "core_memory_promoted_at": datetime.utcnow().isoformat() + "Z",
+                        }
+                    ),
+                    thread_id,
+                ),
+            )
+            if cur.rowcount == 0:
+                raise HTTPException(status_code=404, detail="Thread not found.")
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _get_semantic_memories(thread_id: str, limit: int) -> list[str]:
     conn = get_conn()
     try:
@@ -404,9 +441,7 @@ def list_threads_route(
 ) -> dict[str, Any]:
     auth_user_id = _authorize_request(x_api_key, authorization)
     effective_user_id = _resolve_effective_user_id(user_id, auth_user_id)
-    rows = _query_threads(
-        user_id=effective_user_id, limit=_normalize_limit(limit, 50, 200)
-    )
+    rows = _query_threads(user_id=effective_user_id, limit=_normalize_limit(limit, 50, 200))
     return {"threads": rows, "user_id": effective_user_id}
 
 
@@ -448,6 +483,28 @@ def delete_thread_route(
     auth_user_id = _authorize_request(x_api_key, authorization)
     deleted = _delete_thread(thread_id, auth_user_id)
     return {"thread_id": thread_id, "ok": True, "deleted": deleted}
+
+
+@app.post("/v1/threads/{thread_id}/promote-core-memory")
+def promote_thread_core_memory_route(
+    thread_id: str,
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
+
+    summary_updated = force_update_summary(thread_id)
+    _mark_thread_core_memory(thread_id)
+    summary = _get_active_summary(thread_id)
+
+    return {
+        "thread_id": thread_id,
+        "summary": summary,
+        "summary_updated": summary_updated,
+        "is_core_memory": True,
+        "ok": True,
+    }
 
 
 @app.post("/v1/threads/{thread_id}/events")

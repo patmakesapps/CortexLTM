@@ -685,3 +685,106 @@ def maybe_update_summary(thread_id: str) -> bool:
     )
 
     return True
+
+
+def force_update_summary(thread_id: str) -> bool:
+    """
+    Force a summary update immediately.
+    - Ignores debounce windows.
+    - Uses meaningful turns when available.
+    - Falls back to non-trivial turns so short threads can still be summarized.
+    Returns True when a summary row is inserted/updated.
+    """
+    active = _get_active_summary(thread_id)
+    since_event_id = active["range_end_event_id"] if active else None
+    events = _fetch_events_since(thread_id, since_event_id)
+
+    turns: List[Dict[str, Any]] = []
+    i = 0
+    while i < len(events):
+        e = events[i]
+        if e["actor"] != "user":
+            i += 1
+            continue
+
+        user_event = e
+        assistant_event = None
+        j = i + 1
+        while j < len(events):
+            if events[j]["actor"] == "assistant":
+                assistant_event = events[j]
+                break
+            j += 1
+
+        user_text = user_event["content"] or ""
+        assistant_text = assistant_event["content"] if assistant_event else ""
+        turns.append(
+            {
+                "user_id": user_event["id"],
+                "assistant_id": assistant_event["id"] if assistant_event else None,
+                "user_text": user_text,
+                "assistant_text": assistant_text,
+                "meaningful": is_meaningful_turn(user_text, assistant_text),
+            }
+        )
+        i += 1
+
+    if not turns:
+        # Nothing new to summarize; still sync master from existing summary if available.
+        _sync_master_from_active_summary(thread_id)
+        return False
+
+    meaningful_turns = [turn for turn in turns if turn["meaningful"]]
+    selected_turns = meaningful_turns if meaningful_turns else turns
+    selected_turns = selected_turns[: max(1, min(len(selected_turns), MEANINGFUL_TARGET))]
+
+    start_event_id = selected_turns[0]["user_id"]
+    last = selected_turns[-1]
+    end_event_id = last["assistant_id"] or last["user_id"]
+
+    turn_lines: List[str] = []
+    for turn in selected_turns:
+        user_line = str(turn["user_text"]).strip().replace("\n", " ")
+        assistant_line = str(turn["assistant_text"]).strip().replace("\n", " ")
+        if len(user_line) > 220:
+            user_line = user_line[:220] + "..."
+        if len(assistant_line) > 220:
+            assistant_line = assistant_line[:220] + "..."
+        if assistant_line:
+            turn_lines.append(f"USER: {user_line} | ASSISTANT: {assistant_line}")
+        else:
+            turn_lines.append(f"USER: {user_line}")
+
+    prior_summary = active["summary"] if active else None
+    candidate = _build_candidate_summary(prior_summary, turn_lines)
+
+    if not active:
+        _insert_active_summary(
+            thread_id=thread_id,
+            summary_text=candidate,
+            start_event_id=start_event_id,
+            end_event_id=end_event_id,
+            meta={
+                "reason": "forced_promote_init",
+                "forced": True,
+                "meaningful_turns": len(meaningful_turns),
+                "last_summary_write_at": _utcnow_iso(),
+            },
+            embed=True,
+        )
+    else:
+        _update_active_summary(
+            thread_id=thread_id,
+            summary_text=candidate,
+            end_event_id=end_event_id,
+            meta_patch={
+                "reason": "forced_promote_update",
+                "forced": True,
+                "meaningful_turns": len(meaningful_turns),
+                "last_summary_write_at": _utcnow_iso(),
+            },
+            embed=True,
+        )
+
+    _sync_master_from_active_summary(thread_id)
+    return True
