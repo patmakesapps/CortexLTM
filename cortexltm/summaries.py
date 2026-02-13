@@ -439,7 +439,11 @@ def _insert_active_summary(
 ) -> str:
     emb = None
     if embed:
-        emb = summary_embedding if summary_embedding is not None else embed_text(summary_text)
+        emb = (
+            summary_embedding
+            if summary_embedding is not None
+            else embed_text(summary_text)
+        )
     emb_literal = _vector_literal(emb)
 
     conn = get_conn()
@@ -482,7 +486,11 @@ def _update_active_summary(
 ) -> None:
     emb = None
     if embed:
-        emb = summary_embedding if summary_embedding is not None else embed_text(summary_text)
+        emb = (
+            summary_embedding
+            if summary_embedding is not None
+            else embed_text(summary_text)
+        )
     emb_literal = _vector_literal(emb)
 
     conn = get_conn()
