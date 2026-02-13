@@ -269,6 +269,24 @@ def _delete_thread(thread_id: str, auth_user_id: str | None) -> bool:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
+            cur.execute(
+                """
+                delete from public.ltm_master_evidence e
+                where
+                  e.thread_id = %s
+                  or e.event_id in (
+                    select ev.id
+                    from public.ltm_events ev
+                    where ev.thread_id = %s
+                  )
+                  or e.summary_id in (
+                    select s.id
+                    from public.ltm_thread_summaries s
+                    where s.thread_id = %s
+                  );
+                """,
+                (thread_id, thread_id, thread_id),
+            )
             if auth_user_id:
                 cur.execute(
                     """

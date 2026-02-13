@@ -1,5 +1,6 @@
 # cortexltm/llm.py
 import os
+from pathlib import Path
 from typing import List, Dict, Optional
 
 from dotenv import load_dotenv
@@ -16,6 +17,8 @@ _DEFAULT_SUMMARY_MODEL = "llama-3.1-8b-instant"
 _MAX_USER_CHARS = 4000
 _MAX_TURN_LINE_CHARS = 600
 _MAX_CONTEXT_MESSAGES = 20
+_SOUL_CACHE_UNSET = object()
+_soul_contract_cache: str | None | object = _SOUL_CACHE_UNSET
 
 
 def _get_client() -> Groq:
@@ -33,6 +36,34 @@ def _get_client() -> Groq:
 
 def _model(name_env: str, default_value: str) -> str:
     return os.getenv(name_env, "").strip() or default_value
+
+
+def _load_soul_contract() -> str | None:
+    global _soul_contract_cache
+
+    if _soul_contract_cache is not _SOUL_CACHE_UNSET:
+        return _soul_contract_cache if isinstance(_soul_contract_cache, str) else None
+
+    configured_path = os.getenv("CORTEX_SOUL_SPEC_PATH", "").strip()
+    candidates: list[Path] = []
+    if configured_path:
+        candidates.append(Path(configured_path))
+
+    repo_default = Path(__file__).resolve().parent.parent / "soul" / "SOUL.md"
+    cwd_default = Path.cwd() / "soul" / "SOUL.md"
+    candidates.extend([repo_default, cwd_default])
+
+    for candidate in candidates:
+        try:
+            value = candidate.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if value:
+            _soul_contract_cache = value
+            return value
+
+    _soul_contract_cache = None
+    return None
 
 
 def chat_reply(
@@ -68,6 +99,17 @@ def chat_reply(
             ),
         }
     ]
+    soul_contract = _load_soul_contract()
+    if soul_contract:
+        msgs.append(
+            {
+                "role": "system",
+                "content": (
+                    "Apply this soul contract for personality, tone, boundaries, and conflict style.\n\n"
+                    + soul_contract
+                ),
+            }
+        )
 
     if context_messages:
         # keep it bounded
