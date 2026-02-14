@@ -292,6 +292,9 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
+Note: the top-level `Cortex.cmd` runner uses this `CortexLTM/.venv` interpreter for
+both CortexLTM and CortexAgent processes.
+
 2) Install the Groq SDK or similar -
 
 ```powershell
