@@ -1,6 +1,10 @@
 .env
+.env.*
+!.env.example
 .venv
 .venv_locked
+venv/
+venv*/
 
 __pycache__/
 *.pyc
