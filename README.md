@@ -2,6 +2,15 @@
 
 CortexLTM is a **schema-driven long-term memory layer** for LLM apps/agents.
 
+## Documentation Refresh (Feb 14, 2026)
+
+- Clarified that `AUTH_MODE=dev` is the default local mode and `AUTH_MODE=supabase` is the production auth path.
+- Kept the soul-contract flow (`soul/SOUL.md` + optional `CORTEX_SOUL_SPEC_PATH`) as the canonical behavior contract.
+- Confirmed current repo docs index:
+  - `README.md`: status, setup, API/auth behavior
+  - `CONTRIBUTING.md`: contributor workflow and PR checklist
+  - `soul/SOUL.md`: canonical assistant behavior contract
+
 ## Release Notes (Feb 2026)
 
 - Added API auth mode support:
