@@ -48,6 +48,12 @@ class EventCreateRequest(BaseModel):
     meta: dict[str, Any] | None = None
 
 
+class EventReactionRequest(BaseModel):
+    reaction: str | None = Field(
+        default=None, pattern="^(thumbs_up|heart|angry|sad|brain)$"
+    )
+
+
 class MemoryContextRequest(BaseModel):
     latest_user_text: str
     short_term_limit: int | None = Field(default=30, ge=1, le=200)
@@ -189,33 +195,73 @@ def _thread_row_to_payload(
     }
 
 
-def _query_events(thread_id: str, limit: int) -> list[dict[str, Any]]:
+def _query_events(
+    thread_id: str, limit: int, reaction_user_id: str | None = None
+) -> list[dict[str, Any]]:
     conn = get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                select id, thread_id, actor, content, meta, created_at
-                from public.ltm_events
-                where thread_id = %s
-                order by created_at desc
-                limit %s;
-                """,
-                (thread_id, limit),
-            )
+            if not reaction_user_id:
+                cur.execute(
+                    """
+                    select id, thread_id, actor, content, meta, created_at, null::text as reaction
+                    from public.ltm_events
+                    where thread_id = %s
+                    order by created_at desc
+                    limit %s;
+                    """,
+                    (thread_id, limit),
+                )
+            else:
+                try:
+                    cur.execute(
+                        """
+                        select
+                          e.id,
+                          e.thread_id,
+                          e.actor,
+                          e.content,
+                          e.meta,
+                          e.created_at,
+                          r.reaction
+                        from public.ltm_events e
+                        left join public.ltm_event_reactions r
+                          on r.event_id = e.id
+                         and r.user_id = %s
+                        where e.thread_id = %s
+                        order by e.created_at desc
+                        limit %s;
+                        """,
+                        (reaction_user_id, thread_id, limit),
+                    )
+                except Exception:
+                    # Keep message reads working before reaction migration is applied.
+                    cur.execute(
+                        """
+                        select id, thread_id, actor, content, meta, created_at, null::text as reaction
+                        from public.ltm_events
+                        where thread_id = %s
+                        order by created_at desc
+                        limit %s;
+                        """,
+                        (thread_id, limit),
+                    )
             rows = cur.fetchall()
         rows.reverse()
         out: list[dict[str, Any]] = []
-        for id_, thread_id_, actor, content, meta, created_at in rows:
+        for id_, thread_id_, actor, content, meta, created_at, reaction in rows:
             if actor not in ("user", "assistant"):
                 continue
+            merged_meta = meta if isinstance(meta, dict) else {}
+            if actor == "assistant" and isinstance(reaction, str) and reaction.strip():
+                merged_meta = {**merged_meta, "reaction": reaction.strip()}
             out.append(
                 {
                     "id": str(id_),
                     "thread_id": str(thread_id_),
                     "role": actor,
                     "content": content,
-                    "meta": meta or {},
+                    "meta": merged_meta,
                     "created_at": _to_iso(created_at),
                 }
             )
@@ -242,6 +288,103 @@ def _assert_thread_owner(thread_id: str, auth_user_id: str | None) -> None:
             row = cur.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="Thread not found.")
+    finally:
+        conn.close()
+
+
+def _get_thread_user_id(thread_id: str) -> str | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select user_id
+                from public.ltm_threads
+                where id = %s
+                limit 1;
+                """,
+                (thread_id,),
+            )
+            row = cur.fetchone()
+        if not row or not row[0]:
+            return None
+        return str(row[0])
+    finally:
+        conn.close()
+
+
+def _resolve_reaction_user_id(thread_id: str, auth_user_id: str | None) -> str | None:
+    if auth_user_id:
+        return auth_user_id
+    return _get_thread_user_id(thread_id)
+
+
+def _event_exists_and_actor(thread_id: str, event_id: str) -> str | None:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select actor
+                from public.ltm_events
+                where id = %s and thread_id = %s
+                limit 1;
+                """,
+                (event_id, thread_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            return None
+        return str(row[0])
+    finally:
+        conn.close()
+
+
+def _set_event_reaction(
+    thread_id: str,
+    event_id: str,
+    user_id: str,
+    reaction: str | None,
+) -> tuple[str | None, bool]:
+    actor = _event_exists_and_actor(thread_id, event_id)
+    if actor is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    if actor != "assistant":
+        raise HTTPException(status_code=400, detail="Reactions can only target assistant events.")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            if reaction is None:
+                cur.execute(
+                    """
+                    delete from public.ltm_event_reactions
+                    where event_id = %s and user_id = %s;
+                    """,
+                    (event_id, user_id),
+                )
+                conn.commit()
+                return None, False
+
+            cur.execute(
+                """
+                insert into public.ltm_event_reactions (event_id, user_id, reaction, meta)
+                values (%s, %s, %s, '{}'::jsonb)
+                on conflict (event_id, user_id)
+                do update set
+                  reaction = excluded.reaction,
+                  updated_at = now()
+                returning reaction;
+                """,
+                (event_id, user_id, reaction),
+            )
+            stored = cur.fetchone()
+            conn.commit()
+            stored_reaction = str(stored[0]) if stored and stored[0] else reaction
+            summary_updated = False
+            if stored_reaction == "brain":
+                summary_updated = force_update_summary(thread_id)
+            return stored_reaction, summary_updated
     finally:
         conn.close()
 
@@ -404,7 +547,10 @@ def _get_semantic_memories(thread_id: str, limit: int) -> list[str]:
 
 
 def _build_memory_context(
-    thread_id: str, latest_user_text: str, short_term_limit: int | None
+    thread_id: str,
+    latest_user_text: str,
+    short_term_limit: int | None,
+    reaction_user_id: str | None = None,
 ) -> list[dict[str, str]]:
     context: list[dict[str, str]] = []
 
@@ -423,14 +569,71 @@ def _build_memory_context(
                 }
             )
 
+    reaction_feedback = (
+        _get_recent_reaction_feedback(thread_id, reaction_user_id, 8)
+        if reaction_user_id
+        else []
+    )
+    if reaction_feedback:
+        context.append(
+            {
+                "role": "system",
+                "content": "User reaction signals:\n- " + "\n- ".join(reaction_feedback),
+            }
+        )
+
     recent = _query_events(
         thread_id=thread_id,
         limit=_normalize_limit(short_term_limit, 30, 200),
+        reaction_user_id=reaction_user_id,
     )
     for message in recent:
         context.append({"role": message["role"], "content": message["content"]})
 
     return context
+
+
+def _get_recent_reaction_feedback(
+    thread_id: str, reaction_user_id: str, limit: int
+) -> list[str]:
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select r.reaction, e.content
+                from public.ltm_event_reactions r
+                join public.ltm_events e on e.id = r.event_id
+                where e.thread_id = %s
+                  and r.user_id = %s
+                  and e.actor = 'assistant'
+                order by r.updated_at desc
+                limit %s;
+                """,
+                (thread_id, reaction_user_id, limit),
+            )
+            rows = cur.fetchall()
+        labels = {
+            "thumbs_up": "liked",
+            "heart": "loved",
+            "angry": "disliked",
+            "sad": "found unhelpful",
+            "brain": "requested a summary after",
+        }
+        out: list[str] = []
+        for reaction, content in rows:
+            reaction_key = str(reaction).strip() if reaction else ""
+            excerpt = str(content or "").strip().replace("\n", " ")
+            if len(excerpt) > 120:
+                excerpt = excerpt[:120] + "..."
+            label = labels.get(reaction_key, reaction_key or "reacted")
+            if excerpt:
+                out.append(f"User {label}: \"{excerpt}\"")
+            else:
+                out.append(f"User reaction: {label}")
+        return out
+    finally:
+        conn.close()
 
 
 @app.get("/health")
@@ -472,7 +675,12 @@ def list_events_route(
 ) -> dict[str, Any]:
     auth_user_id = _authorize_request(x_api_key, authorization)
     _assert_thread_owner(thread_id, auth_user_id)
-    events = _query_events(thread_id=thread_id, limit=_normalize_limit(limit, 100, 200))
+    reaction_user_id = _resolve_reaction_user_id(thread_id, auth_user_id)
+    events = _query_events(
+        thread_id=thread_id,
+        limit=_normalize_limit(limit, 100, 200),
+        reaction_user_id=reaction_user_id,
+    )
     return {"thread_id": thread_id, "messages": events}
 
 
@@ -543,6 +751,36 @@ def create_event_route(
     return {"event_id": event_id}
 
 
+@app.post("/v1/threads/{thread_id}/events/{event_id}/reaction")
+def set_event_reaction_route(
+    thread_id: str,
+    event_id: str,
+    payload: EventReactionRequest,
+    x_api_key: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> dict[str, Any]:
+    auth_user_id = _authorize_request(x_api_key, authorization)
+    _assert_thread_owner(thread_id, auth_user_id)
+    reaction_user_id = _resolve_reaction_user_id(thread_id, auth_user_id)
+    if not reaction_user_id:
+        raise HTTPException(status_code=400, detail="Unable to resolve reaction user.")
+
+    reaction = payload.reaction.strip() if isinstance(payload.reaction, str) else None
+    stored_reaction, summary_updated = _set_event_reaction(
+        thread_id=thread_id,
+        event_id=event_id,
+        user_id=reaction_user_id,
+        reaction=reaction,
+    )
+    return {
+        "thread_id": thread_id,
+        "event_id": event_id,
+        "reaction": stored_reaction,
+        "summary_updated": summary_updated,
+        "ok": True,
+    }
+
+
 @app.get("/v1/threads/{thread_id}/summary")
 def get_summary_route(
     thread_id: str,
@@ -567,6 +805,7 @@ def build_memory_context_route(
         thread_id=thread_id,
         latest_user_text=payload.latest_user_text,
         short_term_limit=payload.short_term_limit,
+        reaction_user_id=_resolve_reaction_user_id(thread_id, auth_user_id),
     )
     return {"thread_id": thread_id, "messages": context}
 
@@ -595,6 +834,7 @@ def chat_route(
             thread_id=thread_id,
             latest_user_text=text,
             short_term_limit=payload.short_term_limit,
+            reaction_user_id=_resolve_reaction_user_id(thread_id, auth_user_id),
         )
         if (
             context

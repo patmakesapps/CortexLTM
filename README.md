@@ -69,6 +69,11 @@ The schema is implemented as ordered SQL scripts:
   - `ltm_master_evidence`: audit trail linking items to threads/events/summaries
   - `set_updated_at()` trigger helper for `updated_at`
 
+- `sql/06_event_reactions.sql`
+  - `ltm_event_reactions`: per-user reactions on assistant events
+  - Supports `thumbs_up`, `heart`, `angry`, `sad`, `brain`
+  - `brain` reaction can trigger immediate summary write via API
+
 ---
 
 ## Thread creation + event logging (Python)
@@ -80,6 +85,9 @@ Core functions:
   - Auto-scores **user** messages if caller leaves `importance_score=0`
   - Auto-embeds events when importance is high (>=5)
   - After an **assistant** event is written, it triggers `maybe_update_summary()`
+- Reactions are handled by `POST /v1/threads/{thread_id}/events/{event_id}/reaction`
+  - Stores/updates per-user reaction for assistant events
+  - `reaction="brain"` calls `force_update_summary(thread_id)` immediately
 
 ### Importance scoring (v1 heuristic)
 A lightweight scoring function `_score_importance()` categorizes user messages:
@@ -192,6 +200,8 @@ This is intentionally a test harness — the “real product” is the memory la
   - `02_events.sql`
   - `03_summaries.sql`
   - `04_master_memory.sql`
+  - `05_connected_accounts.sql`
+  - `06_event_reactions.sql`
 - `.env.example` — env template
 - `README.md` — setup instructions (actively evolving)
 
