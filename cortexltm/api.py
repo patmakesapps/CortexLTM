@@ -5,6 +5,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -338,6 +339,16 @@ def _event_exists_and_actor(thread_id: str, event_id: str) -> str | None:
         return str(row[0])
     finally:
         conn.close()
+
+
+def _normalize_reaction_event_id(event_id: str) -> str:
+    raw = (event_id or "").strip()
+    if raw.startswith("assistant-"):
+        raw = raw[len("assistant-") :].strip()
+    try:
+        return str(UUID(raw))
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail="Event not found.") from exc
 
 
 def _set_event_reaction(
@@ -761,6 +772,7 @@ def set_event_reaction_route(
 ) -> dict[str, Any]:
     auth_user_id = _authorize_request(x_api_key, authorization)
     _assert_thread_owner(thread_id, auth_user_id)
+    normalized_event_id = _normalize_reaction_event_id(event_id)
     reaction_user_id = _resolve_reaction_user_id(thread_id, auth_user_id)
     if not reaction_user_id:
         raise HTTPException(status_code=400, detail="Unable to resolve reaction user.")
@@ -768,13 +780,13 @@ def set_event_reaction_route(
     reaction = payload.reaction.strip() if isinstance(payload.reaction, str) else None
     stored_reaction, summary_updated = _set_event_reaction(
         thread_id=thread_id,
-        event_id=event_id,
+        event_id=normalized_event_id,
         user_id=reaction_user_id,
         reaction=reaction,
     )
     return {
         "thread_id": thread_id,
-        "event_id": event_id,
+        "event_id": normalized_event_id,
         "reaction": stored_reaction,
         "summary_updated": summary_updated,
         "ok": True,

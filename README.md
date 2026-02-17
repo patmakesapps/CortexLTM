@@ -13,6 +13,10 @@ CortexLTM is a **schema-driven long-term memory layer** for LLM apps/agents.
 
 ## Release Notes (Feb 2026)
 
+- Hardened event-reaction route handling for UI message IDs:
+  - `/v1/threads/{thread_id}/events/{event_id}/reaction` now normalizes `assistant-<uuid>` IDs
+  - invalid/non-UUID reaction IDs now return a clean "Event not found" path instead of DB UUID parsing failures
+
 - Added API auth mode support:
   - `AUTH_MODE=dev` for local/open-source contributor workflows.
   - `AUTH_MODE=supabase` for bearer-token-protected API usage.
