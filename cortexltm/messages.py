@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 
 from .db import get_conn
@@ -8,6 +10,8 @@ from .master_memory_extractor import extract_and_write_master_memory
 from .summaries import maybe_update_summary
 
 logger = logging.getLogger(__name__)
+_ASYNC_WORKERS = max(1, int((os.getenv("CORTEX_LTM_ASYNC_WORKERS") or "2").strip() or "2"))
+_SIDE_EFFECTS_EXECUTOR = ThreadPoolExecutor(max_workers=_ASYNC_WORKERS)
 
 
 def _score_importance(actor: str, content: str) -> int:
@@ -198,6 +202,70 @@ def _vector_literal(vec: list[float] | None) -> str | None:
     return "[" + ",".join(str(float(x)) for x in vec) + "]"
 
 
+def _submit_side_effect(task_name: str, fn, *args, **kwargs) -> None:
+    future = _SIDE_EFFECTS_EXECUTOR.submit(fn, *args, **kwargs)
+
+    def _on_done(done):
+        try:
+            done.result()
+        except Exception:
+            logger.exception("side-effect task failed: %s", task_name)
+
+    future.add_done_callback(_on_done)
+
+
+def _capture_master_memory_from_event(
+    *,
+    thread_id: str,
+    event_id: str,
+    content: str,
+    importance_score: int,
+    project_bucket: str | None,
+) -> None:
+    user_id = _fetch_thread_user_id(thread_id)
+    if not user_id:
+        return
+
+    from .master_memory import upsert_master_item, add_master_evidence
+
+    t = (content or "").strip()
+    bucket = project_bucket or (
+        "PROFILE"
+        if any(p in t.lower() for p in ["my name is", "call me ", "i am ", "i'm "])
+        else "LONG_RUNNING_CONTEXT"
+    )
+
+    stored_importance = max(importance_score, 5)
+    master_id = upsert_master_item(
+        user_id=user_id,
+        bucket=bucket,
+        text=t,
+        confidence=0.70,
+        stability="med",
+        embed=False,
+        meta={
+            "source": "auto_event_capture",
+            "importance_score": stored_importance,
+            "capture_reason": "project_phrase" if project_bucket else "importance_high",
+        },
+    )
+
+    add_master_evidence(
+        master_item_id=master_id,
+        thread_id=str(thread_id),
+        event_id=str(event_id),
+        weight=1.0,
+        meta={"source": "auto_event_capture"},
+    )
+
+
+def _run_master_memory_extractor(thread_id: str) -> None:
+    user_id = _fetch_thread_user_id(thread_id)
+    if not user_id:
+        return
+    extract_and_write_master_memory(thread_id=thread_id, user_id=user_id)
+
+
 def add_event(
     thread_id, actor, content, meta=None, importance_score=0, embed: bool = False
 ):
@@ -265,79 +333,25 @@ def add_event(
         capture_forced = actor == "user" and (
             importance_score >= 5 or project_bucket is not None
         )
-        user_id: str | None = None
         if capture_forced:
-            user_id = _fetch_thread_user_id(thread_id)
-            if user_id:
-                try:
-                    from .master_memory import upsert_master_item, add_master_evidence
+            _submit_side_effect(
+                "auto_event_capture",
+                _capture_master_memory_from_event,
+                thread_id=str(thread_id),
+                event_id=str(event_id),
+                content=content,
+                importance_score=importance_score,
+                project_bucket=project_bucket,
+            )
 
-                    t = (content or "").strip()
-                    bucket = project_bucket or (
-                        "PROFILE"
-                        if any(
-                            p in t.lower()
-                            for p in ["my name is", "call me ", "i am ", "i'm "]
-                        )
-                        else "LONG_RUNNING_CONTEXT"
-                    )
-
-                    stored_importance = max(importance_score, 5)
-                    master_id = upsert_master_item(
-                        user_id=user_id,
-                        bucket=bucket,
-                        text=t,
-                        confidence=0.70,
-                        stability="med",
-                        embed=False,
-                        meta={
-                            "source": "auto_event_capture",
-                            "importance_score": stored_importance,
-                            "capture_reason": (
-                                "project_phrase"
-                                if project_bucket
-                                else "importance_high"
-                            ),
-                        },
-                    )
-
-                    add_master_evidence(
-                        master_item_id=master_id,
-                        thread_id=str(thread_id),
-                        event_id=str(event_id),
-                        weight=1.0,
-                        meta={"source": "auto_event_capture"},
-                    )
-                except Exception:
-                    # Never let memory capture break chat loop
-                    logger.exception(
-                        "auto_event_capture failed for thread_id=%s event_id=%s",
-                        thread_id,
-                        event_id,
-                    )
         # Run extractor sparingly (batchy) to reduce cost + junk memories.
         # v1: only extract on very high-signal user turns.
         if actor == "user" and importance_score >= 5:
-            if not user_id:
-                user_id = _fetch_thread_user_id(thread_id)
-            if user_id:
-                try:
-                    extract_and_write_master_memory(
-                        thread_id=thread_id, user_id=user_id
-                    )
-                except Exception:
-                    logger.exception(
-                        "master memory extractor failed for thread_id=%s", thread_id
-                    )
+            _submit_side_effect("master_memory_extractor", _run_master_memory_extractor, str(thread_id))
 
-        # v1: update summaries after a full turn completes (assistant written)
+        # Update summaries out of band so chat responses return faster.
         if actor == "assistant":
-            try:
-                maybe_update_summary(str(thread_id))
-            except Exception:
-                logger.exception(
-                    "summary update failed for thread_id=%s", thread_id
-                )
+            _submit_side_effect("summary_update", maybe_update_summary, str(thread_id))
 
         return str(event_id)
 

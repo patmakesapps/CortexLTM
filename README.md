@@ -13,11 +13,6 @@ CortexLTM is a **schema-driven long-term memory layer** for LLM apps/agents.
 
 ## Release Notes (Feb 2026)
 
-- Refactor-alignment update for CortexAgent orchestration:
-  - clarified execution-policy role of `cortexltm/llm.py` system prompt
-  - canonical persona remains sourced from `soul/SOUL.md` (single persona contract)
-  - helps prevent persona double-injection when CortexAgent planner/executor is active
-
 - Hardened event-reaction route handling for UI message IDs:
   - `/v1/threads/{thread_id}/events/{event_id}/reaction` now normalizes `assistant-<uuid>` IDs
   - invalid/non-UUID reaction IDs now return a clean "Event not found" path instead of DB UUID parsing failures
@@ -311,8 +306,7 @@ py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 ```
 
-Note: the top-level `Cortex.cmd` runner uses this `CortexLTM/.venv` interpreter for
-both CortexLTM and CortexAgent processes.
+Note: the top-level `Cortex.cmd` runner uses this `CortexLTM/.venv` interpreter.
 
 2) Install the Groq SDK or similar -
 

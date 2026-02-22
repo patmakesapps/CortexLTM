@@ -1,6 +1,9 @@
 import os
 import re
 import json
+import hashlib
+import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -25,6 +28,20 @@ SEMANTIC_CUE_REGEX = re.compile(
 )
 
 app = FastAPI(title="CortexLTM API", version="0.1.0")
+_AUTH_CACHE_LOCK = threading.Lock()
+_AUTH_USER_CACHE: dict[str, tuple[str, float]] = {}
+
+
+def _auth_cache_ttl_seconds() -> int:
+    raw = (os.getenv("CORTEX_AUTH_CACHE_TTL_SECONDS") or "30").strip()
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 30
+
+
+def _token_cache_key(access_token: str) -> str:
+    return hashlib.sha256(access_token.encode("utf-8")).hexdigest()
 
 
 @app.exception_handler(DatabaseUnavailableError)
@@ -86,6 +103,15 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
 
 
 def _fetch_supabase_user_id(access_token: str) -> str:
+    ttl = _auth_cache_ttl_seconds()
+    cache_key = _token_cache_key(access_token)
+    now = time.monotonic()
+    if ttl > 0:
+        with _AUTH_CACHE_LOCK:
+            cached = _AUTH_USER_CACHE.get(cache_key)
+            if cached and cached[1] > now:
+                return cached[0]
+
     supabase_url = (os.getenv("SUPABASE_URL") or "").strip().rstrip("/")
     supabase_anon_key = (os.getenv("SUPABASE_ANON_KEY") or "").strip()
     if not supabase_url or not supabase_anon_key:
@@ -117,7 +143,11 @@ def _fetch_supabase_user_id(access_token: str) -> str:
     user_id = payload.get("id")
     if not isinstance(user_id, str) or not user_id.strip():
         raise HTTPException(status_code=401, detail="Access token missing user id.")
-    return user_id.strip()
+    normalized = user_id.strip()
+    if ttl > 0:
+        with _AUTH_CACHE_LOCK:
+            _AUTH_USER_CACHE[cache_key] = (normalized, now + ttl)
+    return normalized
 
 
 def _authorize_request(
