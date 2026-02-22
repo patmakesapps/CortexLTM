@@ -23,7 +23,7 @@ CortexLTM is a **schema-driven long-term memory layer** for LLM apps/agents.
 - Added Supabase token validation on `/v1/*` API routes.
 - Added thread ownership enforcement for authenticated users.
 - Updated env/docs to include `SUPABASE_URL` and `SUPABASE_ANON_KEY` for auth mode.
-- Added canonical soul contract files under `soul/` (`SOUL.md` + `soul.yaml`) for cross-model behavior consistency.
+- Added canonical soul contract file under `soul/` (`SOUL.md`) for cross-model behavior consistency.
 - Added soul-contract injection into `chat_reply()` with optional `CORTEX_SOUL_SPEC_PATH` override.
 - Hardened thread deletion flow to remove dependent `ltm_master_evidence` rows before thread delete.
 
@@ -197,7 +197,6 @@ This is intentionally a test harness — the “real product” is the memory la
   - `__init__.py` — version metadata
 - `soul/`
   - `SOUL.md` - canonical human-readable personality contract
-  - `soul.yaml` - machine-readable behavior policy contract
 - `sql/`
   - `00_extensions.sql`
   - `01_threads.sql`
